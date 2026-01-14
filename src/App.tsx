@@ -1286,56 +1286,6 @@ function PurchaseCard({ purchase, onMarkReturned, onRequestRefund, onInitiateRet
       {/* Shipping progress bar for physical products */}
       <ShippingProgress purchase={purchase} />
 
-      {/* Return/Refund progress for physical products marked as returned */}
-      {(() => {
-        const isDigital = isDigitalOrSubscription(purchase.merchant, purchase.itemDescription);
-        
-        // Show return progress for physical products that are returned (awaiting refund)
-        if (!isDigital && purchase.status === "returned") {
-          return (
-            <div className="py-3 border-t border-border space-y-3">
-              <div className="flex items-center gap-2">
-                <RotateCcw className="w-4 h-4" style={{ color: "#0D9488" }} />
-                <span className="text-sm font-medium text-foreground">Return Sent</span>
-                <span className="text-xs px-2 py-0.5 rounded bg-teal-500/20 text-teal-400">
-                  Awaiting Refund
-                </span>
-              </div>
-
-              {/* Progress bar */}
-              <div className="relative">
-                <div className="flex items-center justify-between">
-                  <div className="flex flex-col items-center flex-1">
-                    <div className="w-4 h-4 rounded-full flex items-center justify-center z-10 bg-[#0D9488]">
-                      <CheckCircle className="w-3 h-3 text-white" />
-                    </div>
-                    <span className="text-xs mt-1 text-center text-foreground font-medium">Returned</span>
-                  </div>
-                  <div className="flex flex-col items-center flex-1">
-                    <div className="w-4 h-4 rounded-full flex items-center justify-center z-10 bg-[#0D9488]">
-                      <CheckCircle className="w-3 h-3 text-white" />
-                    </div>
-                    <span className="text-xs mt-1 text-center text-foreground font-medium">Processing</span>
-                  </div>
-                  <div className="flex flex-col items-center flex-1">
-                    <div className="w-4 h-4 rounded-full flex items-center justify-center z-10 bg-secondary border border-border" />
-                    <span className="text-xs mt-1 text-center text-muted-foreground">Refunded</span>
-                  </div>
-                </div>
-                <div className="absolute top-2 left-[16.5%] right-[16.5%] h-0.5 bg-secondary -z-0" />
-                <div className="absolute top-2 left-[16.5%] h-0.5 -z-0 transition-all bg-[#0D9488]" style={{ width: "33%" }} />
-              </div>
-
-              <p className="text-xs text-muted-foreground leading-relaxed">
-                Item returned. We'll check your card transactions and notify you when the refund arrives.
-              </p>
-            </div>
-          );
-        }
-        
-        return null;
-      })()}
-
       {/* Subscription refund info or refund pending progress */}
       {(() => {
         const subscriptionInfo = getSubscriptionRefundInfo(purchase.merchant, purchase.itemDescription, purchase.purchaseDate);
