@@ -563,6 +563,16 @@ For example, Amazon emails often say "Ordered: [Item 1] and 1 more item" or list
 Look for phrases like "and 1 more item", "Order 1 of 2", "Shipment 1", "Shipment 2", etc.
 EACH ITEM that ships separately should be its own entry in the "orders" array.
 
+IMPORTANT - FORWARDED EMAILS: This email may be a FORWARDED purchase email.
+Look for these indicators:
+- Subject starting with "Fw:", "Fwd:", "FW:", or "Forwarded:"
+- Body containing "--- Forwarded Message ---", "---------- Forwarded message ----------", or similar markers
+- Body containing "From:" and "Subject:" headers within the message body
+
+If this is a forwarded email, extract purchase info from the ORIGINAL message content inside the forward.
+The MERCHANT should be from the original sender (e.g., "Perfect Corset", "Amazon", etc.), NOT the person who forwarded it.
+Forwarded purchase emails should be treated as valid purchases - do NOT mark them as "not_purchase" just because they were forwarded.
+
 From: ${email.sender}
 Subject: ${email.subject}
 Body: ${emailContent.slice(0, 12000)}
@@ -570,20 +580,21 @@ Body: ${emailContent.slice(0, 12000)}
 Today's date is ${now.format("YYYY-MM-DD")}.
 
 For EACH order found, extract:
-1. Order number (e.g., "114-9558898-8264233" for Amazon) - DIFFERENT orders have DIFFERENT order numbers
+1. Order number (e.g., "114-9558898-8264233" for Amazon, "PCNY107791" for other merchants) - DIFFERENT orders have DIFFERENT order numbers
 2. Item description - what specific product(s) in THIS order? Be detailed.
 3. Amount in dollars - CRITICAL: Look for "Grand Total:", "Order Total:", "Total:" near each order.
    - Amazon emails show "Grand Total: $X.XX" for each order - extract that number
    - If you see "$189.65" or similar, extract 189.65 as the number
    - Each order has its OWN total - don't use 0 if a price is visible
+   - For shipping notifications without totals, use 0 (we'll update when we have more info)
 4. Expected delivery date for THIS order (format: YYYY-MM-DD)
 5. Confirmed delivery date - ONLY if THIS order was already delivered (format: YYYY-MM-DD)
-6. Tracking number (if available for this shipment)
-7. Carrier (UPS, FedEx, USPS, Amazon, etc.)
+6. Tracking number (if available for this shipment, e.g., "9261290278833758957342")
+7. Carrier (UPS, FedEx, USPS, Amazon, YunExpress, DHL, etc.)
 
 Also determine:
 - Email type: "order_confirmation", "shipping", "delivery", or "not_purchase"
-- Merchant/store name (e.g., Amazon, Target, Nike)
+- Merchant/store name (e.g., Amazon, Target, Nike, Perfect Corset) - use the ORIGINAL sender for forwarded emails
 - Delivery address (usually same for all orders)
 - Payment method: Look for "Visa ending in 1234", "Mastercard ****5678", "Amex ...4321", etc.
   Extract the card type (Visa, Mastercard, Amex, Discover, etc.) and last 4 digits.
@@ -833,6 +844,54 @@ REMEMBER: Return ALL orders found. Do NOT combine multiple orders into one.`,
                   console.log(
                     `scanRecentEmails: Updated purchase ${matchingPurchase.id} with ${emailType} info`
                   );
+                }
+              } else if (orderNumber) {
+                // No matching purchase found - create a new purchase from shipping/delivery email
+                // This handles cases where order confirmation was missed, forwarded late, etc.
+                console.log(`scanRecentEmails: No existing purchase for ${merchant} order ${orderNumber}, creating from ${emailType} email`);
+                
+                const insertResult = await db.insert(purchases).values({
+                  merchant: merchant,
+                  orderNumber: orderNumber,
+                  itemDescription: itemDescription,
+                  purchaseDate: now.toDate(), // Use current date since we don't have original order date
+                  amount: amountCents,
+                  deliveryAddress: deliveryAddress,
+                  trackingNumber: trackingNumber,
+                  carrier: carrier,
+                  deliveryDate: deliveryDate,
+                  deliveryConfirmed: emailType === "delivery",
+                  cardUsed: cardUsed,
+                  status: "tracking",
+                  createdAt: now.toDate(),
+                  updatedAt: now.toDate(),
+                });
+                newPurchases++;
+                console.log(
+                  `scanRecentEmails: Created purchase from ${emailType} email for ${merchant} - ${itemDescription}`
+                );
+
+                // Look up policies for this new purchase
+                const purchaseId = insertResult.lastInsertRowid as number;
+                if (purchaseId && merchant) {
+                  try {
+                    const policies = await lookupReturnPolicies(sdk, {
+                      purchaseId,
+                      merchant,
+                      cardUsed,
+                    });
+                    if (policies?.cardName) {
+                      const cardName = policies.cardName;
+                      const purchaseDate = deliveryDate || now.toDate(); // Use delivery date if available
+                      await db
+                        .update(purchases)
+                        .set({ cardUsed: cardName })
+                        .where(eq(purchases.id, purchaseId));
+                      console.log(`scanRecentEmails: Matched card ${cardName} for purchase ${purchaseId}`);
+                    }
+                  } catch (cardError) {
+                    console.error(`scanRecentEmails: Failed to match card for purchase ${purchaseId}`, cardError);
+                  }
                 }
               }
             }
