@@ -6,7 +6,7 @@ import dayjs from "dayjs";
 import timezone from "dayjs/plugin/timezone";
 import utc from "dayjs/plugin/utc";
 import { useState } from "react";
-import { AlertTriangle, ArrowLeft, Calendar, Camera, Check, CheckCircle, ChevronDown, Circle, Clock, CreditCard, Image as ImageIcon, MapPin, Package, RefreshCw, RotateCcw, Send, Shield, Store, Truck, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Bot, Calendar, Camera, Check, CheckCircle, ChevronDown, Circle, Clock, CreditCard, ExternalLink, Image as ImageIcon, Mail, MapPin, Package, RefreshCw, RotateCcw, Send, Shield, Store, Truck, X } from "lucide-react";
 // Note: CreditCard icon kept for displaying card info in purchase cards
 import type {
   getTrackedPurchases,
@@ -15,7 +15,12 @@ import type {
   getExpiringPurchases,
   scanReceipt,
   initiateReturn,
+  returnLineItems,
   scanRecentEmails,
+  markAsDelivered,
+  getReturnInstructions,
+  emailReturnInstructions,
+  triggerAutomatedReturn,
 } from "./server";
 
 dayjs.extend(utc);
@@ -44,6 +49,16 @@ function LoadingIcon({ className }: { className?: string }) {
   );
 }
 
+// Type for line items within a purchase (for multi-item orders)
+interface LineItem {
+  id: number;
+  description: string;
+  quantity: number | null;
+  amountCents: number | null;
+  amount: string | null;
+  status: string | null; // "keeping", "returning", "returned"
+}
+
 // Type for purchase data
 interface Purchase {
   id: number;
@@ -53,6 +68,7 @@ interface Purchase {
   cardUsed: string | null;
   purchaseDate: string | null;
   itemDescription: string | null;
+  productImageUrl: string | null;
   deliveryDate: string | null;
   deliveryConfirmed: boolean;
   deliveryAddress: string | null;
@@ -73,6 +89,10 @@ interface Purchase {
   storeAlertSent: boolean | null;
   cardAlertSent: boolean | null;
   status: string | null;
+  // Line items for multi-item orders (e.g., Nordstrom)
+  hasLineItems: boolean;
+  lineItemCount: number;
+  lineItems: LineItem[];
 }
 
 // Helper to calculate days until expiration
@@ -180,6 +200,148 @@ function isDigitalOrSubscription(merchant: string, itemDescription: string | nul
     "henry meds", "henrymeds"
   ];
   return digitalKeywords.some(keyword => text.includes(keyword));
+}
+
+// Merchant icon configuration - returns icon URL or null for fallback
+function getMerchantIcon(merchant: string): { url: string; bgColor: string } | null {
+  const m = merchant.toLowerCase();
+  
+  // Major retailers with recognizable logos (using high-quality favicon/logo URLs)
+  const merchantIcons: Record<string, { url: string; bgColor: string }> = {
+    // E-commerce
+    amazon: { url: "https://www.amazon.com/favicon.ico", bgColor: "#FF9900" },
+    amzn: { url: "https://www.amazon.com/favicon.ico", bgColor: "#FF9900" },
+    ebay: { url: "https://www.ebay.com/favicon.ico", bgColor: "#E53238" },
+    etsy: { url: "https://www.etsy.com/favicon.ico", bgColor: "#F56400" },
+    walmart: { url: "https://www.walmart.com/favicon.ico", bgColor: "#0071CE" },
+    target: { url: "https://www.target.com/favicon.ico", bgColor: "#CC0000" },
+    costco: { url: "https://www.costco.com/favicon.ico", bgColor: "#E31837" },
+    bestbuy: { url: "https://www.bestbuy.com/favicon.ico", bgColor: "#0046BE" },
+    "best buy": { url: "https://www.bestbuy.com/favicon.ico", bgColor: "#0046BE" },
+    homedepot: { url: "https://www.homedepot.com/favicon.ico", bgColor: "#F96302" },
+    "home depot": { url: "https://www.homedepot.com/favicon.ico", bgColor: "#F96302" },
+    lowes: { url: "https://www.lowes.com/favicon.ico", bgColor: "#004990" },
+    "lowe's": { url: "https://www.lowes.com/favicon.ico", bgColor: "#004990" },
+    wayfair: { url: "https://www.wayfair.com/favicon.ico", bgColor: "#7B189F" },
+    ikea: { url: "https://www.ikea.com/favicon.ico", bgColor: "#0058A3" },
+    
+    // Tech
+    apple: { url: "https://www.apple.com/favicon.ico", bgColor: "#000000" },
+    microsoft: { url: "https://www.microsoft.com/favicon.ico", bgColor: "#00A4EF" },
+    google: { url: "https://www.google.com/favicon.ico", bgColor: "#4285F4" },
+    samsung: { url: "https://www.samsung.com/favicon.ico", bgColor: "#1428A0" },
+    dell: { url: "https://www.dell.com/favicon.ico", bgColor: "#007DB8" },
+    hp: { url: "https://www.hp.com/favicon.ico", bgColor: "#0096D6" },
+    lenovo: { url: "https://www.lenovo.com/favicon.ico", bgColor: "#E2231A" },
+    
+    // Fashion
+    nike: { url: "https://www.nike.com/favicon.ico", bgColor: "#000000" },
+    adidas: { url: "https://www.adidas.com/favicon.ico", bgColor: "#000000" },
+    zara: { url: "https://www.zara.com/favicon.ico", bgColor: "#000000" },
+    "h&m": { url: "https://www.hm.com/favicon.ico", bgColor: "#E50010" },
+    uniqlo: { url: "https://www.uniqlo.com/favicon.ico", bgColor: "#FF0000" },
+    gap: { url: "https://www.gap.com/favicon.ico", bgColor: "#000080" },
+    nordstrom: { url: "https://www.nordstrom.com/favicon.ico", bgColor: "#000000" },
+    macys: { url: "https://www.macys.com/favicon.ico", bgColor: "#E21A2C" },
+    "macy's": { url: "https://www.macys.com/favicon.ico", bgColor: "#E21A2C" },
+    
+    // Streaming/Digital
+    netflix: { url: "https://www.netflix.com/favicon.ico", bgColor: "#E50914" },
+    spotify: { url: "https://www.spotify.com/favicon.ico", bgColor: "#1DB954" },
+    hulu: { url: "https://www.hulu.com/favicon.ico", bgColor: "#1CE783" },
+    disney: { url: "https://www.disneyplus.com/favicon.ico", bgColor: "#113CCF" },
+    hbo: { url: "https://www.hbomax.com/favicon.ico", bgColor: "#000000" },
+    youtube: { url: "https://www.youtube.com/favicon.ico", bgColor: "#FF0000" },
+    audible: { url: "https://www.audible.com/favicon.ico", bgColor: "#F8991D" },
+    adobe: { url: "https://www.adobe.com/favicon.ico", bgColor: "#FF0000" },
+    
+    // Food/Grocery
+    doordash: { url: "https://www.doordash.com/favicon.ico", bgColor: "#FF3008" },
+    ubereats: { url: "https://www.ubereats.com/favicon.ico", bgColor: "#06C167" },
+    "uber eats": { url: "https://www.ubereats.com/favicon.ico", bgColor: "#06C167" },
+    grubhub: { url: "https://www.grubhub.com/favicon.ico", bgColor: "#F63440" },
+    instacart: { url: "https://www.instacart.com/favicon.ico", bgColor: "#43B02A" },
+    wholefoods: { url: "https://www.wholefoodsmarket.com/favicon.ico", bgColor: "#00674B" },
+    "whole foods": { url: "https://www.wholefoodsmarket.com/favicon.ico", bgColor: "#00674B" },
+    starbucks: { url: "https://www.starbucks.com/favicon.ico", bgColor: "#00704A" },
+    
+    // Other
+    chewy: { url: "https://www.chewy.com/favicon.ico", bgColor: "#1C49C2" },
+    sephora: { url: "https://www.sephora.com/favicon.ico", bgColor: "#000000" },
+    ulta: { url: "https://www.ulta.com/favicon.ico", bgColor: "#000000" },
+    cvs: { url: "https://www.cvs.com/favicon.ico", bgColor: "#CC0000" },
+    walgreens: { url: "https://www.walgreens.com/favicon.ico", bgColor: "#E31837" },
+  };
+
+  // Check for matches
+  for (const [key, icon] of Object.entries(merchantIcons)) {
+    if (m.includes(key)) {
+      return icon;
+    }
+  }
+  
+  return null;
+}
+
+// Product/Merchant image component with animated fallback
+function ProductImage({ merchant, productImageUrl, className }: { 
+  merchant: string; 
+  productImageUrl?: string | null;
+  className?: string;
+}) {
+  const [imageError, setImageError] = useState(false);
+  
+  // If we have a product image URL, try to use it
+  if (productImageUrl && !imageError) {
+    return (
+      <div className={`rounded-lg overflow-hidden bg-white ${className || "w-12 h-12"}`}>
+        <img 
+          src={productImageUrl} 
+          alt="Product"
+          className="w-full h-full object-cover"
+          onError={() => setImageError(true)}
+        />
+      </div>
+    );
+  }
+  
+  // Dynamic gradient fallback based on merchant name
+  const gradients = [
+    "from-rose-500 to-orange-400",
+    "from-orange-500 to-amber-400", 
+    "from-emerald-500 to-teal-400",
+    "from-teal-500 to-cyan-400",
+    "from-blue-500 to-indigo-400",
+    "from-indigo-500 to-purple-400",
+    "from-purple-500 to-pink-400",
+    "from-pink-500 to-rose-400",
+    "from-slate-600 to-slate-400",
+    "from-zinc-600 to-zinc-400",
+  ];
+  
+  const gradientIndex = merchant.split("").reduce((acc, char) => acc + char.charCodeAt(0), 0) % gradients.length;
+  const gradient = gradients[gradientIndex];
+  const initial = merchant.charAt(0).toUpperCase();
+  
+  // Clean merchant name for display
+  const cleanName = merchant.replace(/\*[a-z0-9]+$/i, "").replace(/Mktpl$/i, "").trim();
+  const secondInitial = cleanName.split(" ")[1]?.charAt(0).toUpperCase() || "";
+  
+  return (
+    <div 
+      className={`rounded-lg flex items-center justify-center bg-gradient-to-br ${gradient} shadow-sm ${className || "w-12 h-12"}`}
+    >
+      <div className="relative">
+        {/* Subtle shimmer effect */}
+        <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent animate-pulse" 
+          style={{ animationDuration: "3s" }} 
+        />
+        <span className="text-white font-bold text-lg drop-shadow-sm">
+          {initial}{secondInitial}
+        </span>
+      </div>
+    </div>
+  );
 }
 
 // Get subscription refund info
@@ -389,25 +551,154 @@ const RETURN_REASONS = [
   { value: "other", label: "Other reason" },
 ];
 
-// Return modal component
+// Return instructions data type
+interface ReturnInstructions {
+  merchant: string;
+  orderNumber: string | null;
+  itemDescription: string | null;
+  amount: string;
+  returnUrl: string | null;
+  returnAction: string;
+  daysLeft: number | null;
+  steps: string[];
+  supportedAutomation: boolean;
+}
+
+// Return modal component - supports both single items and multi-item orders
 function ReturnModal({
   purchase,
   onClose,
   onSubmit,
+  onSubmitLineItems,
   isSubmitting,
 }: {
   purchase: Purchase;
   onClose: () => void;
-  onSubmit: (reason: string, notes: string) => void;
+  onSubmit: (reason: string, notes: string, action: "view" | "email" | "automate") => void;
+  onSubmitLineItems: (lineItemIds: number[], reason: string, notes: string, action: "view" | "email" | "automate") => void;
   isSubmitting: boolean;
 }) {
+  // Steps: select_items -> select_reason -> choose_action -> show_instructions
+  const [step, setStep] = useState<"select_items" | "select_reason" | "choose_action" | "show_instructions">(
+    purchase.hasLineItems ? "select_items" : "select_reason"
+  );
+  const [selectedItemIds, setSelectedItemIds] = useState<number[]>([]);
   const [reason, setReason] = useState("");
   const [notes, setNotes] = useState("");
+  const [selectedAction, setSelectedAction] = useState<"view" | "email" | "automate" | null>(null);
+  const [instructions, setInstructions] = useState<ReturnInstructions | null>(null);
+  const [isLoadingInstructions, setIsLoadingInstructions] = useState(false);
+  const [automationStatus, setAutomationStatus] = useState<"idle" | "running" | "success" | "failed">("idle");
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  // Toggle selection of a line item
+  const toggleItem = (itemId: number) => {
+    setSelectedItemIds((prev) =>
+      prev.includes(itemId) ? prev.filter((id) => id !== itemId) : [...prev, itemId]
+    );
+  };
+
+  // Select/deselect all
+  const selectAll = () => {
+    const keepingItems = purchase.lineItems.filter((item) => item.status === "keeping");
+    if (selectedItemIds.length === keepingItems.length) {
+      setSelectedItemIds([]);
+    } else {
+      setSelectedItemIds(keepingItems.map((item) => item.id));
+    }
+  };
+
+  const handleContinueToReason = () => {
+    if (purchase.hasLineItems && selectedItemIds.length === 0) return;
+    setStep("select_reason");
+  };
+
+  const handleContinueToActions = () => {
     if (!reason) return;
-    onSubmit(reason, notes);
+    setStep("choose_action");
+  };
+
+  const handleBack = () => {
+    switch (step) {
+      case "select_reason":
+        if (purchase.hasLineItems) {
+          setStep("select_items");
+        } else {
+          onClose();
+        }
+        break;
+      case "choose_action":
+        setStep("select_reason");
+        break;
+      case "show_instructions":
+        setStep("choose_action");
+        break;
+      default:
+        onClose();
+    }
+  };
+
+  const handleSelectAction = async (action: "view" | "email" | "automate") => {
+    setSelectedAction(action);
+    
+    if (action === "view") {
+      // Fetch and display instructions
+      setIsLoadingInstructions(true);
+      try {
+        const result = await call<typeof getReturnInstructions>("getReturnInstructions", {
+          purchaseId: purchase.id,
+          returnReason: reason,
+        });
+        if (result.success && result.instructions) {
+          setInstructions(result.instructions);
+          setStep("show_instructions");
+        }
+      } catch (error) {
+        console.error("Failed to get instructions:", error);
+      } finally {
+        setIsLoadingInstructions(false);
+      }
+    } else if (action === "email") {
+      // Email instructions to user
+      if (purchase.hasLineItems) {
+        onSubmitLineItems(selectedItemIds, reason, notes, "email");
+      } else {
+        onSubmit(reason, notes, "email");
+      }
+    } else if (action === "automate") {
+      // Trigger automated return
+      setAutomationStatus("running");
+      try {
+        const result = await call<typeof triggerAutomatedReturn>("triggerAutomatedReturn", {
+          purchaseId: purchase.id,
+          returnReason: reason,
+          additionalNotes: notes || undefined,
+        });
+        if (result.success) {
+          setAutomationStatus("success");
+          // Update status after successful automation trigger
+          if (purchase.hasLineItems) {
+            onSubmitLineItems(selectedItemIds, reason, notes, "automate");
+          } else {
+            onSubmit(reason, notes, "automate");
+          }
+        } else {
+          setAutomationStatus("failed");
+        }
+      } catch (error) {
+        console.error("Automation failed:", error);
+        setAutomationStatus("failed");
+      }
+    }
+  };
+
+  // Get items that can still be returned (status = "keeping")
+  const returnableItems = purchase.lineItems.filter((item) => item.status === "keeping");
+  const alreadyReturnedItems = purchase.lineItems.filter((item) => item.status === "returned");
+
+  // Check if this merchant supports automation
+  const supportsAutomation = () => {
+    const m = purchase.merchant.toLowerCase();
+    return m.includes("amazon") || m.includes("walmart") || m.includes("target");
   };
 
   return (
@@ -417,7 +708,12 @@ function ReturnModal({
         <div className="flex items-center justify-between p-4 border-b border-border">
           <div className="flex items-center gap-2">
             <RotateCcw className="w-5 h-5" style={{ color: "#0D9488" }} />
-            <h2 className="font-semibold text-foreground">Return Item</h2>
+            <h2 className="font-semibold text-foreground">
+              {step === "select_items" && "Select Items to Return"}
+              {step === "select_reason" && "Return Reason"}
+              {step === "choose_action" && "How Would You Like to Proceed?"}
+              {step === "show_instructions" && "Return Instructions"}
+            </h2>
           </div>
           <button
             onClick={onClose}
@@ -432,12 +728,16 @@ function ReturnModal({
           <div className="flex justify-between items-start">
             <div className="flex-1 min-w-0 mr-3">
               <h3 className="font-medium text-foreground">
-                {purchase.itemDescription || purchase.merchant.replace(/\*[a-z0-9]+$/i, "").replace(/Mktpl$/i, "")}
+                {purchase.merchant.replace(/\*[a-z0-9]+$/i, "").replace(/Mktpl$/i, "")}
               </h3>
-              {purchase.itemDescription && (
+              {purchase.hasLineItems ? (
                 <p className="text-sm text-muted-foreground">
-                  {purchase.merchant.replace(/\*[a-z0-9]+$/i, "").replace(/Mktpl$/i, "").trim()}
+                  {purchase.lineItemCount} item{purchase.lineItemCount !== 1 ? "s" : ""} in order
                 </p>
+              ) : (
+                purchase.itemDescription && (
+                  <p className="text-sm text-muted-foreground truncate">{purchase.itemDescription}</p>
+                )
               )}
             </div>
             <span className="font-semibold flex-shrink-0" style={{ color: "#0D9488" }}>
@@ -446,87 +746,378 @@ function ReturnModal({
           </div>
         </div>
 
-        {/* Form */}
-        <form onSubmit={handleSubmit} className="p-4 space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-foreground mb-2">
-              Why are you returning this item?
-            </label>
-            <select
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              className="w-full px-3 py-2 rounded border border-border bg-background text-foreground"
-              required
-            >
-              <option value="">Select a reason...</option>
-              {RETURN_REASONS.map((r) => (
-                <option key={r.value} value={r.value}>
-                  {r.label}
-                </option>
+        {/* Step 1: Select Items (only for multi-item orders) */}
+        {step === "select_items" && (
+          <div className="p-4 space-y-4">
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium text-foreground">
+                Which item(s) are you returning?
+              </label>
+              <button
+                type="button"
+                onClick={selectAll}
+                className="text-xs text-teal-400 hover:text-teal-300 transition-colors"
+              >
+                {selectedItemIds.length === returnableItems.length ? "Deselect All" : "Select All"}
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              {returnableItems.map((item) => (
+                <label
+                  key={item.id}
+                  className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
+                    selectedItemIds.includes(item.id)
+                      ? "border-teal-500 bg-teal-500/10"
+                      : "border-border hover:bg-secondary/50"
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedItemIds.includes(item.id)}
+                    onChange={() => toggleItem(item.id)}
+                    className="sr-only"
+                  />
+                  <div
+                    className={`w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 transition-colors ${
+                      selectedItemIds.includes(item.id)
+                        ? "border-teal-500 bg-teal-500"
+                        : "border-muted-foreground"
+                    }`}
+                  >
+                    {selectedItemIds.includes(item.id) && (
+                      <Check className="w-3 h-3 text-white" />
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-foreground truncate">{item.description}</p>
+                    {item.quantity && item.quantity > 1 && (
+                      <p className="text-xs text-muted-foreground">Qty: {item.quantity}</p>
+                    )}
+                  </div>
+                  {item.amount && (
+                    <span className="text-sm text-muted-foreground flex-shrink-0">{item.amount}</span>
+                  )}
+                </label>
               ))}
-            </select>
-          </div>
+            </div>
 
-          <div>
-            <label className="block text-sm font-medium text-foreground mb-2">
-              Additional notes (optional)
-            </label>
-            <textarea
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-              placeholder="Any additional details about the return..."
-              className="w-full px-3 py-2 rounded border border-border bg-background text-foreground placeholder:text-muted-foreground resize-none"
-              rows={3}
-            />
-          </div>
+            {/* Already returned items */}
+            {alreadyReturnedItems.length > 0 && (
+              <div className="pt-2 border-t border-border">
+                <p className="text-xs text-muted-foreground mb-2">Already returned:</p>
+                <div className="space-y-1">
+                  {alreadyReturnedItems.map((item) => (
+                    <div key={item.id} className="flex items-center gap-2 text-xs text-muted-foreground opacity-60">
+                      <Check className="w-3 h-3 text-green-400" />
+                      <span className="truncate">{item.description}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
-          <div className="bg-teal-500/10 border border-teal-500/20 rounded-lg p-3">
-            <p className="text-sm text-teal-400">
-              <strong>What happens next:</strong> We'll research the return process for {purchase.merchant} and email you step-by-step instructions with direct links to initiate your return.
+            <div className="flex gap-2 pt-2">
+              <button
+                type="button"
+                onClick={onClose}
+                className="flex-1 px-4 py-2 rounded bg-secondary text-secondary-foreground hover:bg-secondary/80 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleContinueToReason}
+                disabled={selectedItemIds.length === 0}
+                className="flex-1 px-4 py-2 rounded text-white disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+                style={{ backgroundColor: "#0D9488" }}
+              >
+                Continue
+                <span className="text-xs opacity-75">({selectedItemIds.length} selected)</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Step 2: Select Reason */}
+        {step === "select_reason" && (
+          <div className="p-4 space-y-4">
+            {/* Show selected items summary for multi-item orders */}
+            {purchase.hasLineItems && selectedItemIds.length > 0 && (
+              <div className="bg-secondary/50 rounded-lg p-3">
+                <p className="text-xs text-muted-foreground mb-2">Returning {selectedItemIds.length} item(s):</p>
+                <div className="space-y-1">
+                  {purchase.lineItems
+                    .filter((item) => selectedItemIds.includes(item.id))
+                    .map((item) => (
+                      <p key={item.id} className="text-sm text-foreground truncate">
+                        • {item.description}
+                      </p>
+                    ))}
+                </div>
+              </div>
+            )}
+
+            <div>
+              <label className="block text-sm font-medium text-foreground mb-2">
+                Why are you returning {purchase.hasLineItems ? "these items" : "this item"}?
+              </label>
+              <select
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                className="w-full px-3 py-2 rounded border border-border bg-background text-foreground"
+                required
+              >
+                <option value="">Select a reason...</option>
+                {RETURN_REASONS.map((r) => (
+                  <option key={r.value} value={r.value}>
+                    {r.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-foreground mb-2">
+                Additional notes (optional)
+              </label>
+              <textarea
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="Any additional details about the return..."
+                className="w-full px-3 py-2 rounded border border-border bg-background text-foreground placeholder:text-muted-foreground resize-none"
+                rows={3}
+              />
+            </div>
+
+            <div className="flex gap-2 pt-2">
+              <button
+                type="button"
+                onClick={handleBack}
+                className="flex-1 px-4 py-2 rounded bg-secondary text-secondary-foreground hover:bg-secondary/80 transition-colors flex items-center justify-center gap-2"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                {purchase.hasLineItems ? "Back" : "Cancel"}
+              </button>
+              <button
+                type="button"
+                onClick={handleContinueToActions}
+                disabled={!reason}
+                className="flex-1 px-4 py-2 rounded text-white disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+                style={{ backgroundColor: "#0D9488" }}
+              >
+                Continue
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Step 3: Choose Action */}
+        {step === "choose_action" && (
+          <div className="p-4 space-y-4">
+            <p className="text-sm text-muted-foreground">
+              Choose how you'd like to proceed with your return:
             </p>
-          </div>
 
-          <div className="flex gap-2 pt-2">
+            {/* Option 1: View Instructions */}
             <button
-              type="button"
-              onClick={onClose}
-              className="flex-1 px-4 py-2 rounded bg-secondary text-secondary-foreground hover:bg-secondary/80 transition-colors flex items-center justify-center gap-2"
+              onClick={() => handleSelectAction("view")}
+              disabled={isLoadingInstructions || isSubmitting}
+              className="w-full p-4 rounded-lg border border-border hover:border-teal-500/50 hover:bg-teal-500/5 transition-all text-left group"
             >
-              <ArrowLeft className="w-4 h-4" />
-              Cancel
+              <div className="flex items-start gap-3">
+                <div className="p-2 rounded-lg bg-teal-500/10 text-teal-400 group-hover:bg-teal-500/20">
+                  <ExternalLink className="w-5 h-5" />
+                </div>
+                <div className="flex-1">
+                  <h4 className="font-medium text-foreground mb-1">View Instructions</h4>
+                  <p className="text-sm text-muted-foreground">
+                    See step-by-step return instructions with a direct link to {purchase.merchant}
+                  </p>
+                </div>
+                {isLoadingInstructions && selectedAction === "view" && (
+                  <LoadingIcon className="w-5 h-5 text-teal-400" />
+                )}
+              </div>
             </button>
+
+            {/* Option 2: Email Instructions */}
             <button
-              type="submit"
-              disabled={!reason || isSubmitting}
-              className="flex-1 px-4 py-2 rounded text-white disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
-              style={{ backgroundColor: "#0D9488" }}
+              onClick={() => handleSelectAction("email")}
+              disabled={isLoadingInstructions || isSubmitting}
+              className="w-full p-4 rounded-lg border border-border hover:border-blue-500/50 hover:bg-blue-500/5 transition-all text-left group"
             >
-              {isSubmitting ? (
-                <>
-                  <LoadingIcon className="w-4 h-4" />
-                  Processing...
-                </>
-              ) : (
-                <>
-                  <Send className="w-4 h-4" />
-                  Get Instructions
-                </>
-              )}
+              <div className="flex items-start gap-3">
+                <div className="p-2 rounded-lg bg-blue-500/10 text-blue-400 group-hover:bg-blue-500/20">
+                  <Mail className="w-5 h-5" />
+                </div>
+                <div className="flex-1">
+                  <h4 className="font-medium text-foreground mb-1">Email Instructions</h4>
+                  <p className="text-sm text-muted-foreground">
+                    Get the return instructions and links sent to your email for later
+                  </p>
+                </div>
+                {isSubmitting && selectedAction === "email" && (
+                  <LoadingIcon className="w-5 h-5 text-blue-400" />
+                )}
+              </div>
             </button>
+
+            {/* Option 3: Do It For Me (Automation) */}
+            <button
+              onClick={() => handleSelectAction("automate")}
+              disabled={isLoadingInstructions || isSubmitting || !supportsAutomation() || automationStatus === "running"}
+              className={`w-full p-4 rounded-lg border transition-all text-left group ${
+                supportsAutomation()
+                  ? "border-border hover:border-purple-500/50 hover:bg-purple-500/5"
+                  : "border-border/50 opacity-60 cursor-not-allowed"
+              }`}
+            >
+              <div className="flex items-start gap-3">
+                <div className={`p-2 rounded-lg ${
+                  supportsAutomation() 
+                    ? "bg-purple-500/10 text-purple-400 group-hover:bg-purple-500/20"
+                    : "bg-secondary text-muted-foreground"
+                }`}>
+                  <Bot className="w-5 h-5" />
+                </div>
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <h4 className="font-medium text-foreground">Do It For Me</h4>
+                    {supportsAutomation() ? (
+                      <span className="text-xs px-2 py-0.5 rounded bg-purple-500/20 text-purple-400">
+                        ✨ AI-Powered
+                      </span>
+                    ) : (
+                      <span className="text-xs px-2 py-0.5 rounded bg-secondary text-muted-foreground">
+                        Not available
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    {supportsAutomation()
+                      ? "Our AI will automatically navigate the return process for you"
+                      : `Automation not yet available for ${purchase.merchant}`}
+                  </p>
+                </div>
+                {automationStatus === "running" && (
+                  <LoadingIcon className="w-5 h-5 text-purple-400" />
+                )}
+              </div>
+            </button>
+
+            {automationStatus === "failed" && (
+              <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-3">
+                <p className="text-sm text-red-400">
+                  Automation failed. Please try "View Instructions" to complete the return manually.
+                </p>
+              </div>
+            )}
+
+            <div className="flex gap-2 pt-2">
+              <button
+                type="button"
+                onClick={handleBack}
+                className="flex-1 px-4 py-2 rounded bg-secondary text-secondary-foreground hover:bg-secondary/80 transition-colors flex items-center justify-center gap-2"
+              >
+                <ArrowLeft className="w-4 h-4" />
+                Back
+              </button>
+            </div>
           </div>
-        </form>
+        )}
+
+        {/* Step 4: Show Instructions */}
+        {step === "show_instructions" && instructions && (
+          <div className="p-4 space-y-4">
+            {/* Return link button */}
+            {instructions.returnUrl && (
+              <a
+                href={instructions.returnUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block w-full p-4 rounded-lg text-white text-center font-medium hover:opacity-90 transition-colors"
+                style={{ backgroundColor: "#0D9488" }}
+              >
+                <div className="flex items-center justify-center gap-2">
+                  <ExternalLink className="w-5 h-5" />
+                  {instructions.returnAction}
+                </div>
+              </a>
+            )}
+
+            {/* Order details */}
+            <div className="bg-secondary/50 rounded-lg p-3 space-y-2">
+              {instructions.orderNumber && (
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">Order #</span>
+                  <span className="font-mono text-foreground">{instructions.orderNumber}</span>
+                </div>
+              )}
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Amount</span>
+                <span className="font-medium" style={{ color: "#0D9488" }}>{instructions.amount}</span>
+              </div>
+              {instructions.daysLeft !== null && (
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">Return window</span>
+                  <span className={instructions.daysLeft <= 3 ? "text-red-400" : "text-foreground"}>
+                    {instructions.daysLeft} days left
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Step by step instructions */}
+            <div>
+              <h4 className="text-sm font-medium text-foreground mb-3">Return Steps:</h4>
+              <ol className="space-y-2">
+                {instructions.steps.map((step, index) => (
+                  <li key={index} className="flex gap-3 text-sm">
+                    <span className="flex-shrink-0 w-6 h-6 rounded-full bg-secondary flex items-center justify-center text-xs font-medium text-foreground">
+                      {index + 1}
+                    </span>
+                    <span className="text-muted-foreground pt-0.5">{step}</span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+
+            {/* Email option */}
+            <button
+              onClick={() => handleSelectAction("email")}
+              disabled={isSubmitting}
+              className="w-full py-2 rounded border border-border text-sm text-muted-foreground hover:bg-secondary/50 transition-colors flex items-center justify-center gap-2"
+            >
+              <Mail className="w-4 h-4" />
+              Also email me these instructions
+            </button>
+
+            <div className="flex gap-2 pt-2">
+              <button
+                type="button"
+                onClick={onClose}
+                className="flex-1 px-4 py-2 rounded bg-secondary text-secondary-foreground hover:bg-secondary/80 transition-colors"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
 // Single purchase card component
-function PurchaseCard({ purchase, onMarkReturned, onRequestRefund, onInitiateReturn, onResolve }: {
+function PurchaseCard({ purchase, onMarkReturned, onRequestRefund, onInitiateReturn, onResolve, onMarkDelivered, onMarkRefunded }: {
   purchase: Purchase;
   onMarkReturned: (id: number) => void;
   onRequestRefund: (id: number) => void;
   onInitiateReturn: (id: number) => void;
   onResolve: (id: number) => void;
+  onMarkDelivered: (id: number) => void;
+  onMarkRefunded: (id: number) => void;
 }) {
   const storeDaysLeft = daysUntil(purchase.storePolicy.expires);
   const cardDaysLeft = daysUntil(purchase.cardProtection.expires);
@@ -550,9 +1141,16 @@ function PurchaseCard({ purchase, onMarkReturned, onRequestRefund, onInitiateRet
 
   const displayMerchant = cleanMerchantName(purchase.merchant);
   
-  // Use item description as primary if available, otherwise use cleaned merchant name
-  const primaryTitle = purchase.itemDescription || displayMerchant;
-  const secondaryInfo = purchase.itemDescription ? displayMerchant : null;
+  // For multi-item orders, show merchant as primary; for single items, show description
+  const primaryTitle = purchase.hasLineItems 
+    ? displayMerchant 
+    : (purchase.itemDescription || displayMerchant);
+  const secondaryInfo = purchase.hasLineItems 
+    ? `${purchase.lineItemCount} item${purchase.lineItemCount !== 1 ? "s" : ""}`
+    : (purchase.itemDescription ? displayMerchant : null);
+
+  // State for expanding line items
+  const [lineItemsExpanded, setLineItemsExpanded] = useState(false);
 
   return (
     <div className={`border rounded-lg p-4 relative ${isUrgent ? "border-red-500/50 bg-red-500/5" : "border-border bg-card"}`}>
@@ -573,16 +1171,25 @@ function PurchaseCard({ purchase, onMarkReturned, onRequestRefund, onInitiateRet
         )}
       </button>
 
-      <div className="flex justify-between items-start mb-3 pr-6">
-        <div className="flex-1 min-w-0 mr-3">
-          <h3 className="font-semibold text-foreground text-lg leading-tight">{primaryTitle}</h3>
-          {secondaryInfo && (
-            <p className="text-sm text-muted-foreground mt-0.5">{secondaryInfo}</p>
-          )}
+      <div className="flex items-start gap-3 mb-3 pr-6">
+        {/* Product image or merchant icon */}
+        <ProductImage 
+          merchant={purchase.merchant} 
+          productImageUrl={purchase.productImageUrl}
+          className="w-12 h-12 flex-shrink-0" 
+        />
+        
+        <div className="flex-1 min-w-0 flex justify-between items-start">
+          <div className="flex-1 min-w-0 mr-3">
+            <h3 className="font-semibold text-foreground text-lg leading-tight">{primaryTitle}</h3>
+            {secondaryInfo && (
+              <p className="text-sm text-muted-foreground mt-0.5">{secondaryInfo}</p>
+            )}
+          </div>
+          <span className="text-lg font-bold flex-shrink-0" style={{ color: "#0D9488" }}>
+            {purchase.amount}
+          </span>
         </div>
-        <span className="text-lg font-bold flex-shrink-0" style={{ color: "#0D9488" }}>
-          {purchase.amount}
-        </span>
       </div>
 
       <div className="grid grid-cols-2 gap-3 mb-3 text-sm">
@@ -606,8 +1213,117 @@ function PurchaseCard({ purchase, onMarkReturned, onRequestRefund, onInitiateRet
         </div>
       )}
 
+      {/* Line items for multi-item orders */}
+      {purchase.hasLineItems && purchase.lineItems.length > 0 && (
+        <div className="mb-3">
+          <button
+            onClick={() => setLineItemsExpanded(!lineItemsExpanded)}
+            className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors w-full"
+          >
+            <ChevronDown
+              className={`w-4 h-4 transition-transform ${lineItemsExpanded ? "rotate-180" : ""}`}
+            />
+            <Package className="w-4 h-4" />
+            <span>
+              {purchase.lineItemCount} item{purchase.lineItemCount !== 1 ? "s" : ""} in this order
+            </span>
+            {/* Show count of returned items if any */}
+            {purchase.lineItems.filter((item) => item.status === "returned").length > 0 && (
+              <span className="text-xs px-2 py-0.5 rounded bg-green-500/20 text-green-400">
+                {purchase.lineItems.filter((item) => item.status === "returned").length} returned
+              </span>
+            )}
+          </button>
+
+          {lineItemsExpanded && (
+            <div className="mt-2 ml-6 space-y-2 border-l-2 border-border pl-3">
+              {purchase.lineItems.map((item) => (
+                <div
+                  key={item.id}
+                  className={`flex items-center justify-between text-sm ${
+                    item.status === "returned" ? "opacity-50" : ""
+                  }`}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    {item.status === "returned" ? (
+                      <Check className="w-3 h-3 text-green-400 flex-shrink-0" />
+                    ) : (
+                      <div className="w-3 h-3 rounded-full bg-secondary flex-shrink-0" />
+                    )}
+                    <span className="truncate text-foreground">
+                      {item.description}
+                      {item.quantity && item.quantity > 1 && (
+                        <span className="text-muted-foreground"> ×{item.quantity}</span>
+                      )}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    {item.status === "returned" && (
+                      <span className="text-xs text-green-400">Returned</span>
+                    )}
+                    {item.amount && (
+                      <span className="text-muted-foreground">{item.amount}</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Shipping progress bar for physical products */}
       <ShippingProgress purchase={purchase} />
+
+      {/* Return/Refund progress for physical products marked as returned */}
+      {(() => {
+        const isDigital = isDigitalOrSubscription(purchase.merchant, purchase.itemDescription);
+        
+        // Show return progress for physical products that are returned (awaiting refund)
+        if (!isDigital && purchase.status === "returned") {
+          return (
+            <div className="py-3 border-t border-border space-y-3">
+              <div className="flex items-center gap-2">
+                <RotateCcw className="w-4 h-4" style={{ color: "#0D9488" }} />
+                <span className="text-sm font-medium text-foreground">Return Sent</span>
+                <span className="text-xs px-2 py-0.5 rounded bg-teal-500/20 text-teal-400">
+                  Awaiting Refund
+                </span>
+              </div>
+
+              {/* Progress bar */}
+              <div className="relative">
+                <div className="flex items-center justify-between">
+                  <div className="flex flex-col items-center flex-1">
+                    <div className="w-4 h-4 rounded-full flex items-center justify-center z-10 bg-[#0D9488]">
+                      <CheckCircle className="w-3 h-3 text-white" />
+                    </div>
+                    <span className="text-xs mt-1 text-center text-foreground font-medium">Returned</span>
+                  </div>
+                  <div className="flex flex-col items-center flex-1">
+                    <div className="w-4 h-4 rounded-full flex items-center justify-center z-10 bg-[#0D9488]">
+                      <CheckCircle className="w-3 h-3 text-white" />
+                    </div>
+                    <span className="text-xs mt-1 text-center text-foreground font-medium">Processing</span>
+                  </div>
+                  <div className="flex flex-col items-center flex-1">
+                    <div className="w-4 h-4 rounded-full flex items-center justify-center z-10 bg-secondary border border-border" />
+                    <span className="text-xs mt-1 text-center text-muted-foreground">Refunded</span>
+                  </div>
+                </div>
+                <div className="absolute top-2 left-[16.5%] right-[16.5%] h-0.5 bg-secondary -z-0" />
+                <div className="absolute top-2 left-[16.5%] h-0.5 -z-0 transition-all bg-[#0D9488]" style={{ width: "33%" }} />
+              </div>
+
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                Item returned. We'll check your card transactions and notify you when the refund arrives.
+              </p>
+            </div>
+          );
+        }
+        
+        return null;
+      })()}
 
       {/* Subscription refund info or refund pending progress */}
       {(() => {
@@ -689,6 +1405,68 @@ function PurchaseCard({ purchase, onMarkReturned, onRequestRefund, onInitiateRet
         );
       })()}
 
+      {/* Return processing progress bar for physical products */}
+      {(() => {
+        const isSubscription = getSubscriptionRefundInfo(purchase.merchant, purchase.itemDescription, purchase.purchaseDate)?.isSubscription;
+        const isProcessingReturn = purchase.status === "return_initiated" || purchase.status === "returned";
+        
+        // Only show for non-subscription items in return processing
+        if (isSubscription || !isProcessingReturn) return null;
+        
+        const isReturned = purchase.status === "returned";
+        const expectedRefund = purchase.amountCents ? `$${(purchase.amountCents / 100).toFixed(2)}` : purchase.amount;
+        
+        return (
+          <div className="py-3 border-t border-border space-y-3">
+            <div className="flex items-center gap-2">
+              <RotateCcw className="w-4 h-4" style={{ color: "#0066CC" }} />
+              <span className="text-sm font-medium text-foreground">Return in Progress</span>
+              <span className={`text-xs px-2 py-0.5 rounded ${isReturned ? "bg-amber-500/20 text-amber-400" : "bg-blue-500/20 text-blue-400"}`}>
+                {isReturned ? "Awaiting Refund" : "Processing"}
+              </span>
+            </div>
+
+            {/* Progress bar */}
+            <div className="relative">
+              <div className="flex items-center justify-between">
+                <div className="flex flex-col items-center flex-1">
+                  <div className="w-4 h-4 rounded-full flex items-center justify-center z-10 bg-[#0066CC]">
+                    <CheckCircle className="w-3 h-3 text-white" />
+                  </div>
+                  <span className="text-xs mt-1 text-center text-foreground font-medium">Initiated</span>
+                </div>
+                <div className="flex flex-col items-center flex-1">
+                  <div className={`w-4 h-4 rounded-full flex items-center justify-center z-10 ${isReturned ? "bg-[#0066CC]" : "bg-[#0066CC] animate-pulse"}`}>
+                    {isReturned ? (
+                      <CheckCircle className="w-3 h-3 text-white" />
+                    ) : (
+                      <div className="w-2 h-2 rounded-full bg-white" />
+                    )}
+                  </div>
+                  <span className={`text-xs mt-1 text-center ${isReturned ? "text-foreground font-medium" : "text-foreground font-medium"}`}>
+                    {isReturned ? "Returned" : "Processing"}
+                  </span>
+                </div>
+                <div className="flex flex-col items-center flex-1">
+                  <div className="w-4 h-4 rounded-full flex items-center justify-center z-10 bg-secondary border border-border" />
+                  <span className="text-xs mt-1 text-center text-muted-foreground">Refunded</span>
+                </div>
+              </div>
+              <div className="absolute top-2 left-[16.5%] right-[16.5%] h-0.5 bg-secondary -z-0" />
+              <div 
+                className="absolute top-2 left-[16.5%] h-0.5 -z-0 transition-all bg-[#0066CC]" 
+                style={{ width: isReturned ? "66%" : "33%" }} 
+              />
+            </div>
+
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              Expected refund: <span className="text-foreground font-medium">{expectedRefund}</span>. 
+              We'll automatically check your bank transactions and notify you when the refund arrives.
+            </p>
+          </div>
+        );
+      })()}
+
       {/* Store return policy section - only show after delivery */}
       {(() => {
         const shippingStatus = getShippingStatus(purchase);
@@ -755,14 +1533,23 @@ function PurchaseCard({ purchase, onMarkReturned, onRequestRefund, onInitiateRet
           // For digital products, they're "delivered" immediately. For physical, check delivery status
           const canReturn = isDigital || isDelivered;
           const hasReturnWindow = storeDaysLeft === null || storeDaysLeft >= 0 || cardDaysLeft === null || cardDaysLeft >= 0;
-          const isRefundPending = purchase.status === "return_initiated";
+          const isProcessing = purchase.status === "return_initiated" || purchase.status === "returned";
 
-          // For subscriptions, show "Ask for Refund" button (unless refund is pending)
+          // For items in processing state (awaiting refund), show "Mark Refunded" button
+          if (isProcessing) {
+            return (
+              <button
+                onClick={() => onMarkRefunded(purchase.id)}
+                className="flex-1 px-3 py-1.5 text-sm rounded bg-green-500/20 text-green-400 hover:bg-green-500/30 transition-colors flex items-center justify-center gap-1"
+              >
+                <CheckCircle className="w-3.5 h-3.5" />
+                Mark Refunded
+              </button>
+            );
+          }
+
+          // For subscriptions, show "Ask for Refund" button
           if (isSubscription) {
-            // Don't show button if refund already requested
-            if (isRefundPending) {
-              return null;
-            }
             return (
               <button
                 onClick={() => onRequestRefund(purchase.id)}
@@ -771,6 +1558,19 @@ function PurchaseCard({ purchase, onMarkReturned, onRequestRefund, onInitiateRet
               >
                 <RefreshCw className="w-3.5 h-3.5" />
                 Ask for Refund
+              </button>
+            );
+          }
+
+          // For physical products, show mark delivered button if not yet delivered
+          if (!isDelivered && !isDigital) {
+            return (
+              <button
+                onClick={() => onMarkDelivered(purchase.id)}
+                className="flex-1 px-3 py-1.5 text-sm rounded bg-blue-500/20 text-blue-400 hover:bg-blue-500/30 transition-colors flex items-center justify-center gap-1"
+              >
+                <Truck className="w-3.5 h-3.5" />
+                Mark Delivered
               </button>
             );
           }
@@ -1062,7 +1862,7 @@ function PurchasesList() {
   });
 
   const updateStatusMutation = useMutation({
-    mutationFn: ({ purchaseId, status }: { purchaseId: number; status: "returned" | "dismissed" | "return_initiated" | "resolved" | "tracking" }) =>
+    mutationFn: ({ purchaseId, status }: { purchaseId: number; status: "returned" | "dismissed" | "return_initiated" | "resolved" | "tracking" | "refunded" }) =>
       call<typeof updatePurchaseStatus>("updatePurchaseStatus", { purchaseId, status }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["trackedPurchases"] });
@@ -1080,10 +1880,35 @@ function PurchasesList() {
     },
   });
 
+  // Mutation for returning specific line items from multi-item orders
+  const returnLineItemsMutation = useMutation({
+    mutationFn: ({ purchaseId, lineItemIds, returnReason, additionalNotes }: { 
+      purchaseId: number; 
+      lineItemIds: number[]; 
+      returnReason: string; 
+      additionalNotes?: string 
+    }) =>
+      call<typeof returnLineItems>("returnLineItems", { purchaseId, lineItemIds, returnReason, additionalNotes }),
+    onSuccess: (result) => {
+      if (result.success) {
+        setReturnModalPurchase(null);
+        queryClient.invalidateQueries({ queryKey: ["trackedPurchases"] });
+      }
+    },
+  });
+
+  const markDeliveredMutation = useMutation({
+    mutationFn: ({ purchaseId }: { purchaseId: number }) =>
+      call<typeof markAsDelivered>("markAsDelivered", { purchaseId }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["trackedPurchases"] });
+    },
+  });
+
   const [isScanning, setIsScanning] = useState(false);
   
   // Unified filters
-  type FilterType = "all" | "subscriptions" | "processing" | "resolved";
+  type FilterType = "all" | "active" | "subscriptions" | "processing" | "archived";
   const [activeFilter, setActiveFilter] = useState<FilterType>("all");
 
   const handleScanEmails = async () => {
@@ -1122,13 +1947,49 @@ function PurchasesList() {
     }
   };
 
-  const handleReturnSubmit = (reason: string, notes: string) => {
+  const handleMarkDelivered = (id: number) => {
+    markDeliveredMutation.mutate({ purchaseId: id });
+  };
+
+  const handleMarkRefunded = (id: number) => {
+    // Mark as refunded - this moves the item to the resolved filter
+    updateStatusMutation.mutate({ purchaseId: id, status: "refunded" });
+  };
+
+  const handleReturnSubmit = (reason: string, notes: string, action: "view" | "email" | "automate") => {
     if (!returnModalPurchase) return;
-    initiateReturnMutation.mutate({
-      purchaseId: returnModalPurchase.id,
-      returnReason: reason,
-      additionalNotes: notes || undefined,
-    });
+    
+    // For "email" action, we use the initiateReturn which sends email
+    // For "view" and "automate", the modal handles it directly
+    if (action === "email") {
+      initiateReturnMutation.mutate({
+        purchaseId: returnModalPurchase.id,
+        returnReason: reason,
+        additionalNotes: notes || undefined,
+      });
+    } else if (action === "automate") {
+      // Modal already triggered automation, just close and refresh
+      setReturnModalPurchase(null);
+      queryClient.invalidateQueries({ queryKey: ["trackedPurchases"] });
+    }
+  };
+
+  // Handler for returning specific line items from multi-item orders
+  const handleReturnLineItems = (lineItemIds: number[], reason: string, notes: string, action: "view" | "email" | "automate") => {
+    if (!returnModalPurchase) return;
+    
+    if (action === "email") {
+      returnLineItemsMutation.mutate({
+        purchaseId: returnModalPurchase.id,
+        lineItemIds,
+        returnReason: reason,
+        additionalNotes: notes || undefined,
+      });
+    } else if (action === "automate") {
+      // Modal already triggered automation, just close and refresh
+      setReturnModalPurchase(null);
+      queryClient.invalidateQueries({ queryKey: ["trackedPurchases"] });
+    }
   };
 
   if (isLoading) {
@@ -1155,29 +2016,42 @@ function PurchasesList() {
 
   const purchasesList = purchases || [];
 
+  // Helper to check if item is in processing state (awaiting refund)
+  const isProcessingReturn = (p: { status: string | null }) => 
+    p.status === "return_initiated" || p.status === "returned" || p.status === "partial_return";
+
+  // Helper to check if item is archived
+  const isArchived = (p: { status: string | null }) => 
+    p.status === "resolved" || p.status === "refunded";
+
   // Calculate counts for each filter
-  const subscriptionCount = purchasesList.filter((p) =>
-    isDigitalOrSubscription(p.merchant, p.itemDescription) && p.status !== "resolved"
-  ).length;
-  const processingCount = purchasesList.filter((p) => p.status === "return_initiated").length;
-  const resolvedCount = purchasesList.filter((p) => p.status === "resolved").length;
+  const allCount = purchasesList.filter((p) => !isArchived(p)).length;
   const activeCount = purchasesList.filter((p) => 
-    p.status !== "resolved" && !isDigitalOrSubscription(p.merchant, p.itemDescription)
+    !isArchived(p) && !isProcessingReturn(p) && !isDigitalOrSubscription(p.merchant, p.itemDescription)
   ).length;
+  const subscriptionCount = purchasesList.filter((p) =>
+    isDigitalOrSubscription(p.merchant, p.itemDescription) && !isArchived(p) && !isProcessingReturn(p)
+  ).length;
+  const processingCount = purchasesList.filter((p) => isProcessingReturn(p)).length;
+  const archivedCount = purchasesList.filter((p) => isArchived(p)).length;
 
   // Apply active filter
   const filteredPurchases = purchasesList.filter((p) => {
     switch (activeFilter) {
-      case "subscriptions":
-        return isDigitalOrSubscription(p.merchant, p.itemDescription) && p.status !== "resolved";
-      case "processing":
-        return p.status === "return_initiated";
-      case "resolved":
-        return p.status === "resolved";
       case "all":
+        // Show all non-archived purchases
+        return !isArchived(p);
+      case "active":
+        // Show active physical products only
+        return !isArchived(p) && !isProcessingReturn(p) && !isDigitalOrSubscription(p.merchant, p.itemDescription);
+      case "subscriptions":
+        return isDigitalOrSubscription(p.merchant, p.itemDescription) && !isArchived(p) && !isProcessingReturn(p);
+      case "processing":
+        return isProcessingReturn(p);
+      case "archived":
+        return isArchived(p);
       default:
-        // Show all active non-subscription items
-        return p.status !== "resolved" && !isDigitalOrSubscription(p.merchant, p.itemDescription);
+        return !isArchived(p);
     }
   });
 
@@ -1190,10 +2064,11 @@ function PurchasesList() {
 
   // Filter labels
   const filterLabels: Record<FilterType, string> = {
-    all: "Active",
+    all: "All Purchases",
+    active: "Active",
     subscriptions: "Subscriptions",
     processing: "Processing",
-    resolved: "Resolved",
+    archived: "Archived",
   };
 
   return (
@@ -1226,6 +2101,9 @@ function PurchasesList() {
             className="w-full appearance-none bg-secondary/50 border border-border rounded-lg px-4 py-2.5 pr-10 text-sm font-medium text-foreground cursor-pointer hover:bg-secondary transition-colors focus:outline-none focus:ring-2 focus:ring-[#0D9488]/50"
           >
             <option value="all">
+              📋 All Purchases ({allCount})
+            </option>
+            <option value="active">
               📦 Active Purchases ({activeCount})
             </option>
             <option value="subscriptions">
@@ -1234,8 +2112,8 @@ function PurchasesList() {
             <option value="processing">
               ⏳ Processing Returns ({processingCount})
             </option>
-            <option value="resolved">
-              ✓ Resolved ({resolvedCount})
+            <option value="archived">
+              📁 Archived ({archivedCount})
             </option>
           </select>
           <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
@@ -1257,6 +2135,8 @@ function PurchasesList() {
                 onRequestRefund={handleRequestRefund}
                 onInitiateReturn={handleInitiateReturn}
                 onResolve={handleResolve}
+                onMarkDelivered={handleMarkDelivered}
+                onMarkRefunded={handleMarkRefunded}
               />
             ))}
           </div>
@@ -1271,7 +2151,8 @@ function PurchasesList() {
           purchase={returnModalPurchase}
           onClose={() => setReturnModalPurchase(null)}
           onSubmit={handleReturnSubmit}
-          isSubmitting={initiateReturnMutation.isPending}
+          onSubmitLineItems={handleReturnLineItems}
+          isSubmitting={initiateReturnMutation.isPending || returnLineItemsMutation.isPending}
         />
       )}
     </>

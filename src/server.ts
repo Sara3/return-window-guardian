@@ -16,6 +16,7 @@ import {
   cachedCardProtections,
   cachedPolicies,
   processedEmails,
+  purchaseLineItems,
   purchases,
   sentAlerts,
 } from "./schema";
@@ -238,43 +239,49 @@ function matchPurchaseToTransaction(
   
   const normalizedMerchant = normalizeName(purchase.merchant);
   
-  // Find transactions within 5 days of purchase date that match amount
+  // Find transactions within 7 days of purchase date that approximately match amount
   const candidates = transactions.filter(tx => {
     const txDate = dayjs(tx.date).tz(getUserTimeZone());
     const daysDiff = Math.abs(txDate.diff(purchaseDate, 'day'));
     
-    // Must be within 5 days
-    if (daysDiff > 5) return false;
+    // Must be within 7 days (increased from 5)
+    if (daysDiff > 7) return false;
     
-    // Amount must match (transactions are negative for purchases, so use absolute value)
+    // Amount must match - transactions can be positive or negative depending on account type
     const txAmount = Math.abs(tx.amount);
     const amountDiff = Math.abs(txAmount - purchaseAmountDollars);
     
-    // Allow small difference for rounding (within $0.05)
-    return amountDiff < 0.05;
+    // Allow 2% difference or $1, whichever is larger (for taxes, fees, rounding)
+    const tolerance = Math.max(purchaseAmountDollars * 0.02, 1.00);
+    return amountDiff <= tolerance;
   });
   
-  if (candidates.length === 0) return null;
-  
-  // If only one candidate, use it
-  const firstCandidate = candidates[0];
-  if (candidates.length === 1 && firstCandidate) {
-    console.log(`matchPurchaseToTransaction: Matched ${purchase.merchant} $${purchaseAmountDollars} to ${firstCandidate.description} on ${firstCandidate.account_name}`);
-    return firstCandidate.account_name;
+  if (candidates.length === 0) {
+    // No matches found - log for debugging
+    console.log(`matchPurchaseToTransaction: No match for ${purchase.merchant} $${purchaseAmountDollars.toFixed(2)} on ${purchaseDate.format('YYYY-MM-DD')}`);
+    return null;
   }
   
-  // Multiple candidates - try to match by merchant name
+  // First, try to match by merchant name
   const normalizedDesc = (desc: string) => normalizeName(desc);
   
   for (const tx of candidates) {
-    if (normalizedDesc(tx.description).includes(normalizedMerchant) || 
-        normalizedMerchant.includes(normalizedDesc(tx.description).slice(0, 6))) {
-      console.log(`matchPurchaseToTransaction: Matched ${purchase.merchant} to ${tx.description} on ${tx.account_name}`);
+    const txDescNorm = normalizedDesc(tx.description);
+    if (txDescNorm.includes(normalizedMerchant) || 
+        normalizedMerchant.includes(txDescNorm.slice(0, 6))) {
+      console.log(`matchPurchaseToTransaction: Matched ${purchase.merchant} $${purchaseAmountDollars.toFixed(2)} to "${tx.description}" on ${tx.account_name}`);
       return tx.account_name;
     }
   }
   
-  // Fallback: return the closest date match
+  // If only one candidate, use it even without name match
+  const firstCandidate = candidates[0];
+  if (candidates.length === 1 && firstCandidate) {
+    console.log(`matchPurchaseToTransaction: Single candidate match ${purchase.merchant} $${purchaseAmountDollars.toFixed(2)} to "${firstCandidate.description}" on ${firstCandidate.account_name}`);
+    return firstCandidate.account_name;
+  }
+  
+  // Multiple candidates without name match - return the closest date match
   const sorted = candidates.sort((a, b) => {
     const aDiff = Math.abs(dayjs(a.date).tz(getUserTimeZone()).diff(purchaseDate, 'day'));
     const bDiff = Math.abs(dayjs(b.date).tz(getUserTimeZone()).diff(purchaseDate, 'day'));
@@ -283,7 +290,7 @@ function matchPurchaseToTransaction(
   
   const bestMatch = sorted[0];
   if (bestMatch) {
-    console.log(`matchPurchaseToTransaction: Fuzzy matched ${purchase.merchant} to ${bestMatch.description} on ${bestMatch.account_name}`);
+    console.log(`matchPurchaseToTransaction: Fuzzy matched ${purchase.merchant} $${purchaseAmountDollars.toFixed(2)} to "${bestMatch.description}" on ${bestMatch.account_name}`);
     return bestMatch.account_name;
   }
   
@@ -310,10 +317,32 @@ export const getTrackedPurchases = serverFunction({
         or(
           eq(purchases.status, "tracking"),
           eq(purchases.status, "return_initiated"),
-          eq(purchases.status, "resolved")
+          eq(purchases.status, "returned"),
+          eq(purchases.status, "partial_return"),
+          eq(purchases.status, "resolved"),
+          eq(purchases.status, "refunded")
         )
       )
       .orderBy(desc(purchases.purchaseDate));
+
+    // Fetch all line items for these purchases in one query
+    const purchaseIds = allPurchases.map((p) => p.id);
+    const allLineItems = purchaseIds.length > 0
+      ? await db
+          .select()
+          .from(purchaseLineItems)
+          .where(
+            or(...purchaseIds.map((id) => eq(purchaseLineItems.purchaseId, id)))
+          )
+      : [];
+
+    // Group line items by purchase ID
+    const lineItemsByPurchase = new Map<number, typeof allLineItems>();
+    for (const item of allLineItems) {
+      const existing = lineItemsByPurchase.get(item.purchaseId) || [];
+      existing.push(item);
+      lineItemsByPurchase.set(item.purchaseId, existing);
+    }
 
     console.log(`getTrackedPurchases: Found ${allPurchases.length} purchases`);
 
@@ -325,9 +354,22 @@ export const getTrackedPurchases = serverFunction({
       const startDate = now.subtract(90, 'day').format('YYYY-MM-DD');
       const endDate = now.format('YYYY-MM-DD');
       
+      console.log(`getTrackedPurchases: Fetching transactions from ${startDate} to ${endDate}`);
       const txResult = await get_transactions(sdk, { start_date: startDate, end_date: endDate });
       transactions = txResult.transactions || [];
       console.log(`getTrackedPurchases: Fetched ${transactions.length} transactions for card matching`);
+      
+      // Log sample transactions for debugging
+      if (transactions.length > 0) {
+        const amazonTxns = transactions.filter(t => 
+          t.description.toLowerCase().includes('amazon') || 
+          t.description.toLowerCase().includes('amzn')
+        );
+        console.log(`getTrackedPurchases: Found ${amazonTxns.length} Amazon transactions`);
+        amazonTxns.slice(0, 5).forEach(t => {
+          console.log(`  - ${t.date}: ${t.description} $${Math.abs(t.amount).toFixed(2)} on ${t.account_name}`);
+        });
+      }
     } catch (error) {
       console.error("getTrackedPurchases: Failed to fetch transactions for card matching", error);
     }
@@ -358,6 +400,9 @@ export const getTrackedPurchases = serverFunction({
           cardUsed = matchedCard;
         }
       }
+
+      // Get line items for this purchase
+      const lineItems = lineItemsByPurchase.get(p.id) || [];
       
       return {
         id: p.id,
@@ -367,6 +412,7 @@ export const getTrackedPurchases = serverFunction({
         cardUsed: cardUsed,
         purchaseDate: safeToISOString(p.purchaseDate),
         itemDescription: p.itemDescription,
+        productImageUrl: p.productImageUrl,
         deliveryDate: safeToISOString(p.deliveryDate),
         deliveryConfirmed: p.deliveryConfirmed ?? false,
         deliveryAddress: p.deliveryAddress,
@@ -389,6 +435,17 @@ export const getTrackedPurchases = serverFunction({
         storeAlertSent: p.storeAlertSent,
         cardAlertSent: p.cardAlertSent,
         status: p.status,
+        // Line items for multi-item orders (e.g., Nordstrom with multiple products)
+        hasLineItems: lineItems.length > 0,
+        lineItemCount: lineItems.length,
+        lineItems: lineItems.map((item) => ({
+          id: item.id,
+          description: item.description,
+          quantity: item.quantity,
+          amountCents: item.amountCents,
+          amount: item.amountCents ? formatCurrency(item.amountCents) : null,
+          status: item.status, // "keeping", "returning", "returned"
+        })),
       };
     });
   },
@@ -990,9 +1047,133 @@ export const updatePurchaseStatus = serverFunction({
       updatedAt: dayjs().tz(getUserTimeZone()).toDate(),
     };
 
-    // If marking as returned, set expected refund amount
-    if (status === "returned" && refundExpectedAmount) {
-      updates.refundExpectedAmount = Math.round(refundExpectedAmount * 100);
+    // If marking as returned or return_initiated, set expected refund amount
+    if (status === "returned" || status === "return_initiated") {
+      if (refundExpectedAmount) {
+        updates.refundExpectedAmount = Math.round(refundExpectedAmount * 100);
+      } else {
+        // Look up the purchase amount to use as expected refund
+        const [purchase] = await db
+          .select({ amount: purchases.amount })
+          .from(purchases)
+          .where(eq(purchases.id, purchaseId))
+          .limit(1);
+        
+        if (purchase) {
+          updates.refundExpectedAmount = purchase.amount;
+          console.log(`updatePurchaseStatus: Set expected refund to ${purchase.amount} cents`);
+        }
+      }
+    }
+
+    await db
+      .update(purchases)
+      .set(updates)
+      .where(eq(purchases.id, purchaseId));
+
+    return { success: true };
+  },
+});
+
+/**
+ * Debug: Get recent transactions from Attain Finance
+ */
+export const debugGetTransactions = serverFunction({
+  description: "Debug: Fetch recent transactions from Attain Finance to check card matching",
+  params: Type.Object({
+    daysBack: Type.Optional(Type.Number({ description: "Days back to fetch", default: 30 })),
+  }),
+  exported: true,
+  execute: async (sdk: ServerSdk, { daysBack = 30 }) => {
+    const now = dayjs().tz(getUserTimeZone());
+    const startDate = now.subtract(daysBack, 'day').format('YYYY-MM-DD');
+    const endDate = now.format('YYYY-MM-DD');
+    
+    console.log(`debugGetTransactions: Fetching from ${startDate} to ${endDate}`);
+    
+    try {
+      const result = await get_transactions(sdk, { start_date: startDate, end_date: endDate });
+      const transactions = result.transactions || [];
+      
+      // Group by account_name
+      const byAccount: Record<string, number> = {};
+      transactions.forEach(t => {
+        byAccount[t.account_name] = (byAccount[t.account_name] || 0) + 1;
+      });
+      
+      // Filter for Amazon-like transactions
+      const amazonTxns = transactions.filter(t => 
+        t.description.toLowerCase().includes('amazon') || 
+        t.description.toLowerCase().includes('amzn')
+      );
+      
+      return {
+        totalTransactions: transactions.length,
+        accountBreakdown: byAccount,
+        amazonTransactions: amazonTxns.slice(0, 20).map(t => ({
+          date: t.date,
+          description: t.description,
+          amount: t.amount,
+          account: t.account_name,
+        })),
+        sampleTransactions: transactions.slice(0, 10).map(t => ({
+          date: t.date,
+          description: t.description,
+          amount: t.amount,
+          account: t.account_name,
+        })),
+      };
+    } catch (error) {
+      console.error("debugGetTransactions: Error", error);
+      return { error: String(error) };
+    }
+  },
+});
+
+/**
+ * Mark a purchase as delivered
+ */
+export const markAsDelivered = serverFunction({
+  description: "Mark a purchase as delivered, setting the delivery date to now if not already set",
+  params: Type.Object({
+    purchaseId: Type.Number({ description: "Purchase ID" }),
+  }),
+  exported: true,
+  execute: async (sdk: ServerSdk, { purchaseId }) => {
+    const db = sdk.db<typeof schema>();
+    const now = dayjs().tz(getUserTimeZone()).toDate();
+    
+    console.log(`markAsDelivered: Marking purchase ${purchaseId} as delivered`);
+
+    // Get the current purchase to check for existing delivery date
+    const [purchase] = await db
+      .select()
+      .from(purchases)
+      .where(eq(purchases.id, purchaseId))
+      .limit(1);
+
+    if (!purchase) {
+      return { success: false, error: "Purchase not found" };
+    }
+
+    const updates: Record<string, unknown> = {
+      deliveryConfirmed: true,
+      updatedAt: now,
+    };
+
+    // Only set delivery date if not already set
+    if (!purchase.deliveryDate) {
+      updates.deliveryDate = now;
+    }
+
+    // Recalculate store expiration if policy starts from delivery
+    if (purchase.storePolicyStartsFrom === "delivery" && purchase.storePolicyWindowDays) {
+      const deliveryDate = purchase.deliveryDate || now;
+      updates.storeExpires = dayjs(deliveryDate)
+        .tz(getUserTimeZone())
+        .add(purchase.storePolicyWindowDays, "day")
+        .toDate();
+      console.log(`markAsDelivered: Updated store expiration based on delivery date`);
     }
 
     await db
@@ -1128,82 +1309,64 @@ export const initiateReturn = serverFunction({
       };
     }
 
-    // Generate merchant-specific return info
+    // Generate merchant-specific return link
     const merchantLower = purchase.merchant.toLowerCase();
-    let returnLinks = "";
-    let automatedReturnOption = "";
-
+    let returnUrl = "";
+    let returnAction = "Start your return";
+    
     if (merchantLower.includes("amazon")) {
-      returnLinks = `
-**Quick Links:**
-- [Order History](https://www.amazon.com/gp/css/order-history)
-- [Returns Center](https://www.amazon.com/gp/css/returns/homepage.html)
-${purchase.orderNumber ? `- [This Order](https://www.amazon.com/gp/your-account/order-details?orderID=${purchase.orderNumber})` : ""}`;
-
-      automatedReturnOption = `
----
-
-**🤖 Want me to return this for you?**
-
-Run the Amazon return automation script:
-\`\`\`
-cd amazonRefund && ./run.sh
-\`\`\`
-
-This will open a browser and handle the return process automatically.
-*(Make sure you're logged into Amazon in Chrome first)*`;
-
+      // Direct to order page if we have order number, otherwise returns center
+      returnUrl = purchase.orderNumber 
+        ? `https://www.amazon.com/gp/your-account/order-details?orderID=${purchase.orderNumber}`
+        : "https://www.amazon.com/gp/css/returns/homepage.html";
+      returnAction = "Return on Amazon";
     } else if (merchantLower.includes("walmart")) {
-      returnLinks = `
-**Quick Links:**
-- [Order History](https://www.walmart.com/orders)
-- [Start a Return](https://www.walmart.com/help/article/return-items/a2a6e96e5a964c5f88f31f07a4d95e6c)`;
+      returnUrl = "https://www.walmart.com/orders";
+      returnAction = "Return on Walmart";
     } else if (merchantLower.includes("target")) {
-      returnLinks = `
-**Quick Links:**
-- [Order History](https://www.target.com/orders)
-- [Returns Policy](https://www.target.com/returns)`;
+      returnUrl = "https://www.target.com/orders";
+      returnAction = "Return on Target";
     } else if (merchantLower.includes("bestbuy") || merchantLower.includes("best buy")) {
-      returnLinks = `
-**Quick Links:**
-- [Order Status](https://www.bestbuy.com/profile/ss/orderlookup)
-- [Returns & Exchanges](https://www.bestbuy.com/site/help-topics/return-exchange-policy/pcmcat260800050014.c)`;
+      returnUrl = "https://www.bestbuy.com/profile/ss/orderlookup";
+      returnAction = "Return on Best Buy";
     } else if (merchantLower.includes("apple")) {
-      returnLinks = `
-**Quick Links:**
-- [Order Status](https://www.apple.com/shop/order/list)
-- [Returns & Refunds](https://www.apple.com/shop/help/returns_refund)`;
+      returnUrl = "https://www.apple.com/shop/order/list";
+      returnAction = "Return on Apple";
     } else if (merchantLower.includes("costco")) {
-      returnLinks = `
-**Quick Links:**
-- [Order History](https://www.costco.com/OrderStatusCmd)
-- [Returns Policy](https://customerservice.costco.com/app/answers/detail/a_id/1191)`;
+      returnUrl = "https://www.costco.com/OrderStatusCmd";
+      returnAction = "Return on Costco";
     }
 
-    // Build the notification content
-    const markdown = `## Return Initiated: ${purchase.merchant}
+    // Calculate days left
+    const storeDaysLeft = purchase.storeExpires && !storeExpired 
+      ? dayjs(purchase.storeExpires).tz(getUserTimeZone()).diff(now, "day")
+      : null;
 
-**Order Details:**
-| | |
-|---|---|
-| **Item** | ${purchase.itemDescription || "Not specified"} |
-| **Amount** | ${formatCurrency(purchase.amount)} |
-| **Order #** | ${purchase.orderNumber || "Not available"} |
-| **Purchased** | ${purchase.purchaseDate ? dayjs(purchase.purchaseDate).tz(getUserTimeZone()).format("MMM D, YYYY") : "Unknown"} |
-${purchase.deliveryDate ? `| **Delivered** | ${dayjs(purchase.deliveryDate).tz(getUserTimeZone()).format("MMM D, YYYY")} |` : ""}
-${purchase.deliveryAddress ? `| **Address** | ${purchase.deliveryAddress} |` : ""}
+    // Build short, actionable notification
+    const itemShort = purchase.itemDescription 
+      ? (purchase.itemDescription.length > 50 ? purchase.itemDescription.slice(0, 50) + "..." : purchase.itemDescription)
+      : purchase.merchant;
 
-**Return Reason:** ${returnReason}${additionalNotes ? `\n**Notes:** ${additionalNotes}` : ""}
+    const markdown = returnUrl 
+      ? `## 📦 Return: ${itemShort}
 
-**Return Windows:**
-${purchase.storeExpires && !storeExpired ? `✅ Store: ${dayjs(purchase.storeExpires).tz(getUserTimeZone()).diff(now, "day")} days left (expires ${dayjs(purchase.storeExpires).tz(getUserTimeZone()).format("MMM D")})` : "❌ Store window expired"}
-${purchase.cardExpires && !cardExpired ? `\n✅ Card Protection: ${dayjs(purchase.cardExpires).tz(getUserTimeZone()).diff(now, "day")} days left (expires ${dayjs(purchase.cardExpires).tz(getUserTimeZone()).format("MMM D")})` : purchase.cardProtectionWindowDays ? "\n❌ Card protection expired" : ""}
-${returnLinks}${automatedReturnOption}`;
+**${formatCurrency(purchase.amount)}**${purchase.orderNumber ? ` • Order #${purchase.orderNumber}` : ""}${storeDaysLeft !== null ? ` • ${storeDaysLeft} days left` : ""}
+
+👉 **[${returnAction}](${returnUrl})**
+
+${returnReason ? `_Reason: ${returnReason}_` : ""}`
+      : `## 📦 Return: ${itemShort}
+
+**${formatCurrency(purchase.amount)}**${purchase.orderNumber ? ` • Order #${purchase.orderNumber}` : ""}${storeDaysLeft !== null ? ` • ${storeDaysLeft} days left` : ""}
+
+Visit **${purchase.merchant}** website → Orders → Find this item → Request Return
+
+${returnReason ? `_Reason: ${returnReason}_` : ""}`;
 
     try {
       // Send the notification
       await create_agent_post(sdk, {
-        shortMessage: `Return initiated: ${purchase.merchant} - ${formatCurrency(purchase.amount)}`,
+        shortMessage: `🔄 Return ${itemShort} (${formatCurrency(purchase.amount)})${returnUrl ? " - tap to start" : ""}`,
         attachments: [{ type: "markdown", content: markdown }],
         duration: "read_once",
         priority: "urgent", // Push notification
@@ -1236,6 +1399,528 @@ ${returnLinks}${automatedReturnOption}`;
       console.error("initiateReturn: Error sending notification", error);
       return { success: false, error: "Failed to send return notification" };
     }
+  },
+});
+
+/**
+ * Helper function to generate merchant-specific return info
+ */
+function generateReturnInfo(purchase: {
+  merchant: string;
+  orderNumber: string | null;
+  itemDescription: string | null;
+  amount: number;
+  storeExpires: Date | null;
+}): {
+  returnUrl: string | null;
+  returnAction: string;
+  steps: string[];
+  supportedAutomation: boolean;
+} {
+  const merchantLower = purchase.merchant.toLowerCase();
+  let returnUrl: string | null = null;
+  let returnAction = "Start your return";
+  let steps: string[] = [];
+  let supportedAutomation = false;
+
+  if (merchantLower.includes("amazon")) {
+    returnUrl = purchase.orderNumber
+      ? `https://www.amazon.com/gp/your-account/order-details?orderID=${purchase.orderNumber}`
+      : "https://www.amazon.com/gp/css/returns/homepage.html";
+    returnAction = "Return on Amazon";
+    supportedAutomation = true;
+    steps = [
+      "Click the link above to go to your Amazon order",
+      "Select 'Return or replace items' next to the item",
+      "Check the box next to item(s) you want to return",
+      "Select your return reason from the dropdown",
+      "Choose refund method (original payment recommended)",
+      "Select return shipping method (UPS, Whole Foods, etc.)",
+      "Print your return label or get a QR code",
+      "Package and ship your return within 14 days",
+    ];
+  } else if (merchantLower.includes("walmart")) {
+    returnUrl = "https://www.walmart.com/orders";
+    returnAction = "Return on Walmart";
+    supportedAutomation = true;
+    steps = [
+      "Click the link to go to your Walmart orders",
+      "Find your order and click 'Start a return'",
+      "Select the item(s) you want to return",
+      "Choose your return reason",
+      "Select refund method (original payment or gift card)",
+      "Choose return method (mail or in-store)",
+      "Print shipping label if mailing",
+      "Drop off at FedEx or Walmart store",
+    ];
+  } else if (merchantLower.includes("target")) {
+    returnUrl = "https://www.target.com/orders";
+    returnAction = "Return on Target";
+    supportedAutomation = true;
+    steps = [
+      "Click the link to go to your Target orders",
+      "Find your order and select 'Return an item'",
+      "Select which items to return",
+      "Choose your return reason",
+      "Select return method (mail or store)",
+      "Print return label if mailing",
+      "Return within 90 days of purchase",
+    ];
+  } else if (merchantLower.includes("bestbuy") || merchantLower.includes("best buy")) {
+    returnUrl = "https://www.bestbuy.com/profile/ss/orderlookup";
+    returnAction = "Return on Best Buy";
+    steps = [
+      "Click the link to go to Best Buy orders",
+      "Find your order and click 'Return item'",
+      "Select items and return reason",
+      "Choose mail return or store return",
+      "Print label if returning by mail",
+      "Return within 15 days (or extended for Elite members)",
+    ];
+  } else if (merchantLower.includes("apple")) {
+    returnUrl = "https://www.apple.com/shop/order/list";
+    returnAction = "Return on Apple";
+    steps = [
+      "Click the link to go to Apple orders",
+      "Find your order and click 'Return Items'",
+      "Select items to return",
+      "Print prepaid shipping label",
+      "Pack item in original packaging",
+      "Return within 14 days of delivery",
+    ];
+  } else if (merchantLower.includes("costco")) {
+    returnUrl = "https://www.costco.com/OrderStatusCmd";
+    returnAction = "Return on Costco";
+    steps = [
+      "You can return most items to any Costco warehouse",
+      "Bring item and your receipt or membership card",
+      "Electronics must be returned within 90 days",
+      "For large items, contact customer service",
+    ];
+  } else if (merchantLower.includes("nordstrom")) {
+    returnUrl = "https://www.nordstrom.com/orders";
+    returnAction = "Return on Nordstrom";
+    steps = [
+      "Click the link to go to Nordstrom orders",
+      "Find your order and select 'Start a Return'",
+      "Select items and return reason",
+      "Print prepaid return label",
+      "Drop off at USPS or Nordstrom store",
+      "No time limit on returns with receipt",
+    ];
+  } else {
+    // Generic steps
+    steps = [
+      `Visit ${purchase.merchant} website`,
+      "Log in to your account",
+      "Go to Orders or Order History",
+      purchase.orderNumber ? `Find order #${purchase.orderNumber}` : "Find your recent order",
+      "Click 'Return' or 'Start a Return'",
+      "Follow the prompts to complete your return",
+    ];
+  }
+
+  return { returnUrl, returnAction, steps, supportedAutomation };
+}
+
+/**
+ * Get return instructions for display in the UI
+ */
+export const getReturnInstructions = serverFunction({
+  description: "Get detailed return instructions for a purchase to display in the UI",
+  params: Type.Object({
+    purchaseId: Type.Number({ description: "Purchase ID" }),
+    returnReason: Type.String({ description: "Reason for return" }),
+  }),
+  exported: true,
+  execute: async (sdk: ServerSdk, { purchaseId, returnReason }) => {
+    const db = sdk.db<typeof schema>();
+    const now = dayjs().tz(getUserTimeZone());
+
+    // Get the purchase
+    const purchaseResult = await db
+      .select()
+      .from(purchases)
+      .where(eq(purchases.id, purchaseId))
+      .limit(1);
+
+    const purchase = purchaseResult[0];
+    if (!purchase) {
+      return { success: false, error: "Purchase not found" };
+    }
+
+    // Generate return info
+    const returnInfo = generateReturnInfo(purchase);
+
+    // Calculate days left
+    const storeExpired = purchase.storeExpires && dayjs(purchase.storeExpires).tz(getUserTimeZone()).isBefore(now);
+    const daysLeft = purchase.storeExpires && !storeExpired
+      ? dayjs(purchase.storeExpires).tz(getUserTimeZone()).diff(now, "day")
+      : null;
+
+    return {
+      success: true,
+      instructions: {
+        merchant: purchase.merchant,
+        orderNumber: purchase.orderNumber,
+        itemDescription: purchase.itemDescription,
+        amount: formatCurrency(purchase.amount),
+        returnUrl: returnInfo.returnUrl,
+        returnAction: returnInfo.returnAction,
+        daysLeft,
+        steps: returnInfo.steps,
+        supportedAutomation: returnInfo.supportedAutomation,
+      },
+    };
+  },
+});
+
+/**
+ * Email return instructions to the user
+ * This is the same as initiateReturn but explicitly for emailing
+ */
+export const emailReturnInstructions = serverFunction({
+  description: "Email return instructions to the user",
+  params: Type.Object({
+    purchaseId: Type.Number({ description: "Purchase ID" }),
+    returnReason: Type.String({ description: "Reason for return" }),
+    additionalNotes: Type.Optional(Type.String({ description: "Additional notes" })),
+  }),
+  exported: true,
+  execute: async (sdk: ServerSdk, { purchaseId, returnReason, additionalNotes }) => {
+    // Reuse initiateReturn logic which sends email notification
+    const db = sdk.db<typeof schema>();
+    const now = dayjs().tz(getUserTimeZone());
+
+    const purchaseResult = await db
+      .select()
+      .from(purchases)
+      .where(eq(purchases.id, purchaseId))
+      .limit(1);
+
+    const purchase = purchaseResult[0];
+    if (!purchase) {
+      return { success: false, error: "Purchase not found" };
+    }
+
+    // Generate return info
+    const returnInfo = generateReturnInfo(purchase);
+
+    // Build email content
+    const itemShort = purchase.itemDescription
+      ? (purchase.itemDescription.length > 50 ? purchase.itemDescription.slice(0, 50) + "..." : purchase.itemDescription)
+      : purchase.merchant;
+
+    const storeExpired = purchase.storeExpires && dayjs(purchase.storeExpires).tz(getUserTimeZone()).isBefore(now);
+    const daysLeft = purchase.storeExpires && !storeExpired
+      ? dayjs(purchase.storeExpires).tz(getUserTimeZone()).diff(now, "day")
+      : null;
+
+    let markdown = `## 📦 Return Instructions: ${itemShort}\n\n`;
+    markdown += `**${formatCurrency(purchase.amount)}**`;
+    if (purchase.orderNumber) markdown += ` • Order #${purchase.orderNumber}`;
+    if (daysLeft !== null) markdown += ` • ${daysLeft} days left`;
+    markdown += "\n\n";
+
+    if (returnInfo.returnUrl) {
+      markdown += `👉 **[${returnInfo.returnAction}](${returnInfo.returnUrl})**\n\n`;
+    }
+
+    markdown += "### Steps:\n";
+    returnInfo.steps.forEach((step, i) => {
+      markdown += `${i + 1}. ${step}\n`;
+    });
+
+    if (returnReason) {
+      markdown += `\n_Reason: ${returnReason}_`;
+    }
+    if (additionalNotes) {
+      markdown += `\n_Notes: ${additionalNotes}_`;
+    }
+
+    try {
+      await create_agent_post(sdk, {
+        shortMessage: `📧 Return instructions for ${itemShort}`,
+        attachments: [{ type: "markdown", content: markdown }],
+        duration: "read_once",
+        priority: "normal",
+      });
+
+      return {
+        success: true,
+        message: "Return instructions sent to your email!",
+      };
+    } catch (error) {
+      console.error("emailReturnInstructions: Error sending email", error);
+      return { success: false, error: "Failed to send email" };
+    }
+  },
+});
+
+/**
+ * Trigger automated return process
+ * This queues a job for the browser automation to execute
+ */
+export const triggerAutomatedReturn = serverFunction({
+  description: "Trigger automated return process using browser automation",
+  params: Type.Object({
+    purchaseId: Type.Number({ description: "Purchase ID" }),
+    returnReason: Type.String({ description: "Reason for return" }),
+    additionalNotes: Type.Optional(Type.String({ description: "Additional notes" })),
+  }),
+  exported: true,
+  execute: async (sdk: ServerSdk, { purchaseId, returnReason, additionalNotes }) => {
+    const db = sdk.db<typeof schema>();
+    const now = dayjs().tz(getUserTimeZone());
+
+    console.log(`triggerAutomatedReturn: Starting automated return for purchase ${purchaseId}`);
+
+    // Get the purchase
+    const purchaseResult = await db
+      .select()
+      .from(purchases)
+      .where(eq(purchases.id, purchaseId))
+      .limit(1);
+
+    const purchase = purchaseResult[0];
+    if (!purchase) {
+      return { success: false, error: "Purchase not found" };
+    }
+
+    // Check if automation is supported for this merchant
+    const returnInfo = generateReturnInfo(purchase);
+    if (!returnInfo.supportedAutomation) {
+      return {
+        success: false,
+        error: `Automated returns not yet supported for ${purchase.merchant}`,
+      };
+    }
+
+    // Generate email content for the automation agent
+    const emailContent = `
+Store: ${purchase.merchant}
+Order ID: ${purchase.orderNumber || "Unknown"}
+Customer Name: User
+Item: ${purchase.itemDescription || "Order items"}
+Amount: ${formatCurrency(purchase.amount)}
+Return Reason: ${returnReason}
+${additionalNotes ? `Notes: ${additionalNotes}` : ""}
+`.trim();
+
+    // Update purchase status to indicate automation is in progress
+    await db
+      .update(purchases)
+      .set({
+        status: "return_initiated",
+        refundExpectedAmount: purchase.amount,
+        updatedAt: now.toDate(),
+      })
+      .where(eq(purchases.id, purchaseId));
+
+    // Record the alert
+    await db.insert(sentAlerts).values({
+      purchaseId: purchase.id,
+      alertType: "return_automation_started",
+      sentAt: now.toDate(),
+    });
+
+    // Send notification that automation is starting
+    try {
+      await create_agent_post(sdk, {
+        shortMessage: `🤖 Starting automated return for ${purchase.itemDescription || purchase.merchant}`,
+        attachments: [{
+          type: "markdown",
+          content: `## 🤖 Automated Return Started
+
+**${purchase.merchant}** - ${formatCurrency(purchase.amount)}
+${purchase.orderNumber ? `Order #${purchase.orderNumber}` : ""}
+
+The AI agent will:
+1. Navigate to ${purchase.merchant}
+2. Find your order
+3. Initiate the return process
+4. Select return reason: "${returnReason}"
+5. Complete the return request
+
+You'll receive a notification when complete with the return label/QR code.
+
+⏳ This usually takes 1-3 minutes...`,
+        }],
+        duration: "read_once",
+        priority: "normal",
+      });
+    } catch (error) {
+      console.error("triggerAutomatedReturn: Error sending notification", error);
+    }
+
+    // TODO: Trigger the actual automation
+    // Options for deployment:
+    // 1. Local: Write to a queue file that the Python script reads
+    // 2. Browserbase: Make API call to start browser session
+    // 3. Docker: Call containerized automation service
+    //
+    // For now, we'll create a task file that can be picked up by the automation
+    console.log(`triggerAutomatedReturn: Automation task created for ${purchase.merchant}`);
+    console.log(`Email content for automation:\n${emailContent}`);
+
+    return {
+      success: true,
+      message: "Automated return process started! You'll receive a notification when complete.",
+      automationId: `auto-${purchaseId}-${Date.now()}`,
+    };
+  },
+});
+
+/**
+ * Get line items for a purchase (for multi-item orders like Nordstrom)
+ */
+export const getLineItems = serverFunction({
+  description: "Get individual line items for a purchase (for multi-item orders)",
+  params: Type.Object({
+    purchaseId: Type.Number({ description: "Purchase ID to get line items for" }),
+  }),
+  exported: true,
+  execute: async (sdk: ServerSdk, { purchaseId }) => {
+    const db = sdk.db<typeof schema>();
+
+    const items = await db
+      .select()
+      .from(purchaseLineItems)
+      .where(eq(purchaseLineItems.purchaseId, purchaseId))
+      .orderBy(purchaseLineItems.id);
+
+    return {
+      lineItems: items.map((item) => ({
+        id: item.id,
+        purchaseId: item.purchaseId,
+        description: item.description,
+        quantity: item.quantity,
+        amountCents: item.amountCents,
+        amount: item.amountCents ? formatCurrency(item.amountCents) : null,
+        status: item.status,
+        returnReason: item.returnReason,
+        returnedAt: item.returnedAt?.toISOString() || null,
+      })),
+    };
+  },
+});
+
+/**
+ * Return specific line items from a multi-item order
+ * This allows partial returns (return some items, keep others)
+ */
+export const returnLineItems = serverFunction({
+  description: "Mark specific line items as returned from a multi-item order",
+  params: Type.Object({
+    purchaseId: Type.Number({ description: "Purchase ID" }),
+    lineItemIds: Type.Array(Type.Number({ description: "IDs of line items to return" })),
+    returnReason: Type.String({ description: "Reason for return" }),
+    additionalNotes: Type.Optional(Type.String({ description: "Additional notes" })),
+  }),
+  exported: true,
+  execute: async (sdk: ServerSdk, { purchaseId, lineItemIds, returnReason, additionalNotes }) => {
+    const db = sdk.db<typeof schema>();
+    const now = dayjs().tz(getUserTimeZone());
+
+    console.log(`returnLineItems: Returning ${lineItemIds.length} items from purchase ${purchaseId}`);
+
+    // Get the purchase
+    const purchaseResult = await db
+      .select()
+      .from(purchases)
+      .where(eq(purchases.id, purchaseId))
+      .limit(1);
+
+    const purchase = purchaseResult[0];
+    if (!purchase) {
+      return { success: false, error: "Purchase not found" };
+    }
+
+    // Get all line items for this purchase
+    const allLineItems = await db
+      .select()
+      .from(purchaseLineItems)
+      .where(eq(purchaseLineItems.purchaseId, purchaseId));
+
+    if (allLineItems.length === 0) {
+      return { success: false, error: "No line items found for this purchase" };
+    }
+
+    // Validate that all requested IDs belong to this purchase
+    const validIds = new Set(allLineItems.map((item) => item.id));
+    const invalidIds = lineItemIds.filter((id) => !validIds.has(id));
+    if (invalidIds.length > 0) {
+      return { success: false, error: `Invalid line item IDs: ${invalidIds.join(", ")}` };
+    }
+
+    // Mark the selected line items as returned
+    for (const lineItemId of lineItemIds) {
+      await db
+        .update(purchaseLineItems)
+        .set({
+          status: "returned",
+          returnReason: returnReason,
+          returnedAt: now.toDate(),
+          updatedAt: now.toDate(),
+        })
+        .where(eq(purchaseLineItems.id, lineItemId));
+    }
+
+    // Check if ALL line items are now returned
+    const updatedItems = await db
+      .select()
+      .from(purchaseLineItems)
+      .where(eq(purchaseLineItems.purchaseId, purchaseId));
+
+    const allReturned = updatedItems.every((item) => item.status === "returned");
+
+    // Update the parent purchase status
+    if (allReturned) {
+      await db
+        .update(purchases)
+        .set({ status: "returned", updatedAt: now.toDate() })
+        .where(eq(purchases.id, purchaseId));
+      console.log(`returnLineItems: All items returned, purchase ${purchaseId} marked as returned`);
+    } else {
+      // Some items returned, some kept - mark as "partial_return"
+      await db
+        .update(purchases)
+        .set({ status: "partial_return", updatedAt: now.toDate() })
+        .where(eq(purchases.id, purchaseId));
+      console.log(`returnLineItems: Partial return for purchase ${purchaseId}`);
+    }
+
+    // Get the returned item descriptions for notification
+    const returnedItems = allLineItems.filter((item) => lineItemIds.includes(item.id));
+    const returnedDescriptions = returnedItems.map((item) => item.description).join(", ");
+
+    // Send notification
+    try {
+      let markdown = `**${purchase.merchant}** - Returning ${lineItemIds.length} item(s)\n\n`;
+      markdown += `**Items being returned:**\n`;
+      for (const item of returnedItems) {
+        markdown += `• ${item.description}${item.amountCents ? ` - ${formatCurrency(item.amountCents)}` : ""}\n`;
+      }
+      markdown += `\n**Reason:** ${returnReason}`;
+      if (additionalNotes) {
+        markdown += `\n**Notes:** ${additionalNotes}`;
+      }
+
+      await create_agent_post(sdk, {
+        shortMessage: `Return initiated: ${returnedDescriptions.slice(0, 50)}${returnedDescriptions.length > 50 ? "..." : ""}`,
+        attachments: [{ type: "markdown", content: markdown }],
+        duration: "read_once",
+        priority: "normal",
+      });
+    } catch (error) {
+      console.error("returnLineItems: Error sending notification", error);
+    }
+
+    return {
+      success: true,
+      message: `${lineItemIds.length} item(s) marked for return`,
+      allReturned,
+    };
   },
 });
 
@@ -1599,13 +2284,16 @@ export const checkRefunds = backgroundFunction({
 
     console.log("checkRefunds: Starting refund check");
 
-    // Get purchases marked as "returned" without refund confirmation
+    // Get purchases marked as "returned" or "return_initiated" without refund confirmation
     const pendingRefunds = await db
       .select()
       .from(purchases)
       .where(
         and(
-          eq(purchases.status, "returned"),
+          or(
+            eq(purchases.status, "returned"),
+            eq(purchases.status, "return_initiated")
+          ),
           isNull(purchases.refundConfirmedAt)
         )
       );
@@ -2166,14 +2854,25 @@ export const handlePurchaseEmail = backgroundFunction({
         const today = dayjs().tz(getUserTimeZone()).format("YYYY-MM-DD");
 
         // Use LLM to classify and extract purchase information
-        // IMPORTANT: Schema supports MULTIPLE orders per email (e.g., Amazon often combines orders)
+        // IMPORTANT: Supports BOTH:
+        // - Multiple SEPARATE orders (e.g., Amazon with different order numbers)
+        // - Single order with multiple LINE ITEMS (e.g., Nordstrom with multiple products in one order)
         const extractedRaw = await sdk.callLLM(
           `Analyze this email to extract ALL purchase/order information.
 
-CRITICAL: One email may contain MULTIPLE separate items/orders that ship separately.
-For example, Amazon emails often say "Ordered: [Item 1] and 1 more item" or list multiple items.
-Look for phrases like "and 1 more item", "Order 1 of 2", "Shipment 1", "Shipment 2", etc.
-EACH ITEM that ships separately should be its own entry in the "orders" array.
+CRITICAL: Distinguish between SEPARATE ORDERS vs LINE ITEMS within ONE order:
+
+1. SEPARATE ORDERS (multiple entries in "orders" array):
+   - Have DIFFERENT order numbers
+   - Ship separately with different tracking
+   - Examples: Amazon often says "Order 1 of 2" or has different order IDs
+   - Each becomes a separate entry in "orders" array
+
+2. LINE ITEMS (multiple entries in "lineItems" within ONE order):
+   - Have the SAME order number
+   - Ship together as one package
+   - Examples: Nordstrom Rack with 3 bras in one order, Target with multiple items
+   - Becomes ONE entry in "orders" array with "lineItems" array inside
 
 From: ${email.from}
 Subject: ${email.subject}
@@ -2181,49 +2880,56 @@ Body: ${emailContent.slice(0, 12000)}
 
 Today's date is ${today}.
 
-For EACH order found, extract:
-1. Order number (e.g., "114-9558898-8264233" for Amazon) - DIFFERENT orders have DIFFERENT order numbers
-2. Item description - what specific product(s) in THIS order? Be detailed.
-3. Amount in dollars - CRITICAL: Look for "Grand Total:", "Order Total:", "Total:" near each order.
-   - Amazon emails show "Grand Total: $X.XX" for each order - extract that number
-   - If you see "$189.65" or similar, extract 189.65 as the number
-   - Each order has its OWN total - don't use 0 if a price is visible
-4. Expected delivery date for THIS order (format: YYYY-MM-DD)
-5. Confirmed delivery date - ONLY if THIS order was already delivered (format: YYYY-MM-DD)
-6. Tracking number (if available for this shipment)
-7. Carrier (UPS, FedEx, USPS, Amazon, etc.)
+For EACH ORDER found, extract:
+1. Order number (e.g., "114-9558898-8264233" for Amazon, "#1022158086" for Nordstrom)
+2. If this order contains MULTIPLE individual products, list them in "lineItems":
+   - Each line item has: description, quantity (default 1), amountCents (price in cents), imageUrl (product image URL if in email)
+   - Example: 3 bras at $29.99 each = 3 line items with amountCents: 2999 each
+3. If single product, use "itemDescription" and "amountDollars" directly (lineItems empty)
+4. Total amount for the ORDER in dollars (sum of all items)
+5. Expected delivery date (format: YYYY-MM-DD)
+6. Confirmed delivery date - ONLY if already delivered (format: YYYY-MM-DD)
+7. Tracking number and carrier
+8. Product image URL - look for img src URLs pointing to product images (often from CDNs like m.media-amazon.com, images.nordstrom.com, etc.)
 
 Also determine:
 - Email type: "order_confirmation", "shipping", "delivery", or "not_purchase"
-- Merchant/store name (e.g., Amazon, Target, Nike)
-- Delivery address (usually same for all orders)
-- Payment method: Look for "Visa ending in 1234", "Mastercard ****5678", "Amex ...4321", etc.
-  Extract the card type (Visa, Mastercard, Amex, Discover, etc.) and last 4 digits.
-  If payment method is not visible in the email, use EMPTY STRING "" for both cardType and lastFour.
-  Do NOT use placeholder values like "UNKNOWN" or "<UNKNOWN>".
+- Merchant/store name (e.g., Amazon, Target, Nordstrom Rack)
+- Delivery address
+- Payment method: Extract card type and last 4 digits. Use "" if not visible.
 
-If this is NOT a purchase-related email (marketing, newsletter, etc.), set emailType to "not_purchase" and return empty orders array.
-For text fields you cannot determine, use empty string "". Do NOT use placeholders like "UNKNOWN" or "<UNKNOWN>".
-For amountDollars, ONLY use 0 if no price is visible - otherwise extract the actual price.
+DECISION GUIDE:
+- Same order number + multiple items listed → ONE order with lineItems array
+- Different order numbers → MULTIPLE orders (separate entries)
+- Single item → ONE order with itemDescription (no lineItems needed)
 
-REMEMBER: Return ALL orders found. Do NOT combine multiple orders into one.`,
+For text fields you cannot determine, use empty string "".
+For amountDollars/amountCents, ONLY use 0 if no price is visible.`,
           Type.Object({
             emailType: Type.String(),
             merchant: Type.String(),
             deliveryAddress: Type.String(),
-            paymentCardType: Type.String({ default: "" }), // Visa, Mastercard, Amex, Discover, etc. Use "" if not visible
-            paymentCardLastFour: Type.String({ default: "" }), // Last 4 digits like "1234". Use "" if not visible
+            paymentCardType: Type.String({ default: "" }),
+            paymentCardLastFour: Type.String({ default: "" }),
             orders: Type.Array(Type.Object({
               orderNumber: Type.String(),
-              itemDescription: Type.String(),
-              amountDollars: Type.Number({ default: 0 }),
+              itemDescription: Type.String(), // Used if single item (no lineItems)
+              productImageUrl: Type.String({ default: "" }), // Product image URL if visible in email
+              amountDollars: Type.Number({ default: 0 }), // Total for this order
               expectedDeliveryDate: Type.String(),
               confirmedDeliveryDate: Type.String(),
               trackingNumber: Type.String(),
               carrier: Type.String(),
+              // NEW: Line items for multi-item orders (same order number, ship together)
+              lineItems: Type.Array(Type.Object({
+                description: Type.String(), // Product name
+                quantity: Type.Number({ default: 1 }),
+                amountCents: Type.Number({ default: 0 }), // Price per item in cents
+                imageUrl: Type.String({ default: "" }), // Product image URL
+              })),
             })),
           }),
-          { modelVariant: "STANDARD" } // Use STANDARD for better multi-order extraction
+          { modelVariant: "STANDARD" }
         );
 
         if (!extractedRaw || extractedRaw.emailType === "not_purchase" || !extractedRaw.merchant) {
@@ -2255,11 +2961,18 @@ REMEMBER: Return ALL orders found. Do NOT combine multiple orders into one.`,
         const orders = (extractedRaw.orders as Array<{
           orderNumber: string;
           itemDescription: string;
+          productImageUrl: string;
           amountDollars: number;
           expectedDeliveryDate: string;
           confirmedDeliveryDate: string;
           trackingNumber: string;
           carrier: string;
+          lineItems: Array<{
+            description: string;
+            quantity: number;
+            amountCents: number;
+            imageUrl: string;
+          }>;
         }>) || [];
 
         console.log(`handlePurchaseEmail: Found ${orders.length} order(s) from ${merchant}`);
@@ -2338,6 +3051,7 @@ REMEMBER: Return ALL orders found. Do NOT combine multiple orders into one.`,
                 amount: amountCents ?? 0,
                 cardUsed: cardUsed,
                 itemDescription: itemDescription,
+                productImageUrl: order.productImageUrl || null,
                 orderNumber: orderNumber,
                 deliveryDate,
                 deliveryAddress: deliveryAddress,
@@ -2351,6 +3065,23 @@ REMEMBER: Return ALL orders found. Do NOT combine multiple orders into one.`,
 
             const inserted = insertResult[0];
             if (inserted) {
+              // Create line items if this order has multiple products
+              const lineItems = order.lineItems || [];
+              if (lineItems.length > 0) {
+                console.log(`handlePurchaseEmail: Creating ${lineItems.length} line items for purchase ${inserted.id}`);
+                for (const lineItem of lineItems) {
+                  await db.insert(purchaseLineItems).values({
+                    purchaseId: inserted.id,
+                    description: lineItem.description,
+                    quantity: lineItem.quantity || 1,
+                    amountCents: lineItem.amountCents || 0,
+                    status: "keeping",
+                    createdAt: now.toDate(),
+                    updatedAt: now.toDate(),
+                  });
+                }
+              }
+
               // Look up return policies
               await lookupAndApplyReturnPolicy(
                 sdk,

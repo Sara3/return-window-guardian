@@ -18,6 +18,7 @@ export const purchases = sqliteTable("purchases", {
 
   // From email matching
   itemDescription: text("item_description"),
+  productImageUrl: text("product_image_url"), // Product image URL extracted from email
   orderNumber: text("order_number"),
   deliveryDate: integer("delivery_date", { mode: "timestamp" }),
   deliveryConfirmed: integer("delivery_confirmed", { mode: "boolean" }).default(false), // True when delivery is confirmed (vs expected)
@@ -97,4 +98,31 @@ export const sentAlerts = sqliteTable("sent_alerts", {
   purchaseId: integer("purchase_id").notNull(),
   alertType: text("alert_type").notNull(), // "store_expiring", "card_expiring", "new_tracking", "weekly_summary"
   sentAt: integer("sent_at", { mode: "timestamp" }).notNull(),
+});
+
+// Line items within a purchase (for multi-item orders like Nordstrom)
+// When an order contains multiple products that ship together,
+// each product is a line item. This enables:
+// - Tracking which specific items are returned
+// - Asking "which item?" in the return flow
+// - Partial returns (return some items, keep others)
+export const purchaseLineItems = sqliteTable("purchase_line_items", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  purchaseId: integer("purchase_id").notNull(), // FK to purchases.id
+
+  // Item details
+  description: text("description").notNull(), // Product name/description
+  quantity: integer("quantity").default(1),
+  amountCents: integer("amount_cents"), // Price for this item in cents
+  sku: text("sku"), // Optional product SKU/identifier
+  imageUrl: text("image_url"), // Product image URL from email
+
+  // Return tracking per item
+  status: text("status").default("keeping"), // "keeping", "returning", "returned"
+  returnReason: text("return_reason"),
+  returnedAt: integer("returned_at", { mode: "timestamp" }),
+
+  // Timestamps
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull(),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull(),
 });
