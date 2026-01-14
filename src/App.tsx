@@ -317,7 +317,7 @@ function ShippingProgress({ purchase }: { purchase: Purchase }) {
     <div className="py-3 border-t border-border">
       {/* Status message */}
       <div className="flex items-center gap-2 mb-3">
-        <Truck className="w-4 h-4" style={{ color: "#D97706" }} />
+        <Truck className="w-4 h-4" style={{ color: "#0D9488" }} />
         <span className="text-sm font-medium text-foreground">
           {getStatusMessage()}
         </span>
@@ -336,7 +336,7 @@ function ShippingProgress({ purchase }: { purchase: Purchase }) {
               <div
                 className={`w-4 h-4 rounded-full flex items-center justify-center z-10 ${
                   index <= statusIndex
-                    ? "bg-[#D97706]"
+                    ? "bg-[#0D9488]"
                     : "bg-secondary border border-border"
                 }`}
               >
@@ -361,7 +361,7 @@ function ShippingProgress({ purchase }: { purchase: Purchase }) {
         {/* Connecting line (behind the circles) */}
         <div className="absolute top-2 left-[12.5%] right-[12.5%] h-0.5 bg-secondary -z-0" />
         <div
-          className="absolute top-2 left-[12.5%] h-0.5 -z-0 transition-all bg-[#D97706]"
+          className="absolute top-2 left-[12.5%] h-0.5 -z-0 transition-all bg-[#0D9488]"
           style={{
             width: `${Math.max(0, (statusIndex / (steps.length - 1)) * 75)}%`,
           }}
@@ -416,7 +416,7 @@ function ReturnModal({
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-border">
           <div className="flex items-center gap-2">
-            <RotateCcw className="w-5 h-5" style={{ color: "#D97706" }} />
+            <RotateCcw className="w-5 h-5" style={{ color: "#0D9488" }} />
             <h2 className="font-semibold text-foreground">Return Item</h2>
           </div>
           <button
@@ -440,7 +440,7 @@ function ReturnModal({
                 </p>
               )}
             </div>
-            <span className="font-semibold flex-shrink-0" style={{ color: "#D97706" }}>
+            <span className="font-semibold flex-shrink-0" style={{ color: "#0D9488" }}>
               {purchase.amount}
             </span>
           </div>
@@ -480,8 +480,8 @@ function ReturnModal({
             />
           </div>
 
-          <div className="bg-amber-500/10 border border-amber-500/20 rounded-lg p-3">
-            <p className="text-sm text-amber-400">
+          <div className="bg-teal-500/10 border border-teal-500/20 rounded-lg p-3">
+            <p className="text-sm text-teal-400">
               <strong>What happens next:</strong> We'll research the return process for {purchase.merchant} and email you step-by-step instructions with direct links to initiate your return.
             </p>
           </div>
@@ -499,7 +499,7 @@ function ReturnModal({
               type="submit"
               disabled={!reason || isSubmitting}
               className="flex-1 px-4 py-2 rounded text-white disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
-              style={{ backgroundColor: "#D97706" }}
+              style={{ backgroundColor: "#0D9488" }}
             >
               {isSubmitting ? (
                 <>
@@ -580,7 +580,7 @@ function PurchaseCard({ purchase, onMarkReturned, onRequestRefund, onInitiateRet
             <p className="text-sm text-muted-foreground mt-0.5">{secondaryInfo}</p>
           )}
         </div>
-        <span className="text-lg font-bold flex-shrink-0" style={{ color: "#D97706" }}>
+        <span className="text-lg font-bold flex-shrink-0" style={{ color: "#0D9488" }}>
           {purchase.amount}
         </span>
       </div>
@@ -619,9 +619,9 @@ function PurchaseCard({ purchase, onMarkReturned, onRequestRefund, onInitiateRet
           return (
             <div className="py-3 border-t border-border space-y-3">
               <div className="flex items-center gap-2">
-                <RefreshCw className="w-4 h-4" style={{ color: "#D97706" }} />
+                <RefreshCw className="w-4 h-4" style={{ color: "#0D9488" }} />
                 <span className="text-sm font-medium text-foreground">Refund Requested</span>
-                <span className="text-xs px-2 py-0.5 rounded bg-amber-500/20 text-amber-400">
+                <span className="text-xs px-2 py-0.5 rounded bg-teal-500/20 text-teal-400">
                   Pending
                 </span>
               </div>
@@ -630,13 +630,13 @@ function PurchaseCard({ purchase, onMarkReturned, onRequestRefund, onInitiateRet
               <div className="relative">
                 <div className="flex items-center justify-between">
                   <div className="flex flex-col items-center flex-1">
-                    <div className="w-4 h-4 rounded-full flex items-center justify-center z-10 bg-[#D97706]">
+                    <div className="w-4 h-4 rounded-full flex items-center justify-center z-10 bg-[#0D9488]">
                       <CheckCircle className="w-3 h-3 text-white" />
                     </div>
                     <span className="text-xs mt-1 text-center text-foreground font-medium">Requested</span>
                   </div>
                   <div className="flex flex-col items-center flex-1">
-                    <div className="w-4 h-4 rounded-full flex items-center justify-center z-10 bg-[#D97706]">
+                    <div className="w-4 h-4 rounded-full flex items-center justify-center z-10 bg-[#0D9488]">
                       <CheckCircle className="w-3 h-3 text-white" />
                     </div>
                     <span className="text-xs mt-1 text-center text-foreground font-medium">Processing</span>
@@ -647,7 +647,7 @@ function PurchaseCard({ purchase, onMarkReturned, onRequestRefund, onInitiateRet
                   </div>
                 </div>
                 <div className="absolute top-2 left-[16.5%] right-[16.5%] h-0.5 bg-secondary -z-0" />
-                <div className="absolute top-2 left-[16.5%] h-0.5 -z-0 transition-all bg-[#D97706]" style={{ width: "33%" }} />
+                <div className="absolute top-2 left-[16.5%] h-0.5 -z-0 transition-all bg-[#0D9488]" style={{ width: "33%" }} />
               </div>
 
               <p className="text-xs text-muted-foreground leading-relaxed">
@@ -676,7 +676,7 @@ function PurchaseCard({ purchase, onMarkReturned, onRequestRefund, onInitiateRet
         return (
           <div className="py-3 border-t border-border space-y-2">
             <div className="flex items-center gap-2">
-              <RefreshCw className="w-4 h-4" style={{ color: "#D97706" }} />
+              <RefreshCw className="w-4 h-4" style={{ color: "#0D9488" }} />
               <span className="text-sm font-medium text-foreground">Subscription</span>
               <span className={`text-xs px-2 py-0.5 rounded ${likelihoodBgColors[subscriptionInfo.refundLikelihood]} ${likelihoodColors[subscriptionInfo.refundLikelihood]}`}>
                 {likelihoodLabels[subscriptionInfo.refundLikelihood]} refund chance
@@ -706,7 +706,7 @@ function PurchaseCard({ purchase, onMarkReturned, onRequestRefund, onInitiateRet
             title={`${purchase.storePolicy.windowDays} days from ${purchase.storePolicy.startsFrom || "purchase"}`}
           >
             <div className="flex items-center gap-2">
-              <Store className="w-4 h-4" style={{ color: "#D97706" }} />
+              <Store className="w-4 h-4" style={{ color: "#0D9488" }} />
               <span className="text-sm text-foreground">Store Return</span>
             </div>
             <div className="flex items-center gap-2">
@@ -723,7 +723,7 @@ function PurchaseCard({ purchase, onMarkReturned, onRequestRefund, onInitiateRet
       {purchase.cardProtection.windowDays && (!purchase.storePolicy.windowDays || (storeDaysLeft !== null && storeDaysLeft < 0)) && (
         <div className="flex items-center justify-between py-2 border-t border-border">
           <div className="flex items-center gap-2">
-            <Shield className="w-4 h-4" style={{ color: "#D97706" }} />
+            <Shield className="w-4 h-4" style={{ color: "#0D9488" }} />
             <div className="text-sm">
               <span className="text-foreground">
                 {purchase.cardUsed && purchase.cardUsed !== "CREDIT CARD"
@@ -767,7 +767,7 @@ function PurchaseCard({ purchase, onMarkReturned, onRequestRefund, onInitiateRet
               <button
                 onClick={() => onRequestRefund(purchase.id)}
                 className="flex-1 px-3 py-1.5 text-sm rounded text-white hover:opacity-90 transition-colors flex items-center justify-center gap-1"
-                style={{ backgroundColor: "#D97706" }}
+                style={{ backgroundColor: "#0D9488" }}
               >
                 <RefreshCw className="w-3.5 h-3.5" />
                 Ask for Refund
@@ -782,7 +782,7 @@ function PurchaseCard({ purchase, onMarkReturned, onRequestRefund, onInitiateRet
                 <button
                   onClick={() => onInitiateReturn(purchase.id)}
                   className="flex-1 px-3 py-1.5 text-sm rounded text-white hover:opacity-90 transition-colors flex items-center justify-center gap-1"
-                  style={{ backgroundColor: "#D97706" }}
+                  style={{ backgroundColor: "#0D9488" }}
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
                   Return This
@@ -1034,7 +1034,7 @@ function AddPurchaseForm({ onSuccess }: { onSuccess: () => void }) {
             type="submit"
             disabled={addMutation.isPending || scanMutation.isPending || !merchant || !amount}
             className="flex-1 py-2 rounded text-white disabled:opacity-50 transition-colors"
-            style={{ backgroundColor: "#D97706" }}
+            style={{ backgroundColor: "#0D9488" }}
           >
             {addMutation.isPending ? "Adding..." : "Add Purchase"}
           </button>
@@ -1223,7 +1223,7 @@ function PurchasesList() {
           <select
             value={activeFilter}
             onChange={(e) => setActiveFilter(e.target.value as FilterType)}
-            className="w-full appearance-none bg-secondary/50 border border-border rounded-lg px-4 py-2.5 pr-10 text-sm font-medium text-foreground cursor-pointer hover:bg-secondary transition-colors focus:outline-none focus:ring-2 focus:ring-[#D97706]/50"
+            className="w-full appearance-none bg-secondary/50 border border-border rounded-lg px-4 py-2.5 pr-10 text-sm font-medium text-foreground cursor-pointer hover:bg-secondary transition-colors focus:outline-none focus:ring-2 focus:ring-[#0D9488]/50"
           >
             <option value="all">
               📦 Active Purchases ({activeCount})
@@ -1293,7 +1293,7 @@ function WidgetView() {
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <LoadingIcon className="w-6 h-6 text-[#D97706]" />
+        <LoadingIcon className="w-6 h-6 text-[#0D9488]" />
       </div>
     );
   }
@@ -1310,13 +1310,13 @@ function WidgetView() {
   return (
     <div className="h-full flex flex-col p-3">
       <div className="flex items-center gap-2 mb-3">
-        <Shield className="w-5 h-5" style={{ color: "#D97706" }} />
+        <Shield className="w-5 h-5" style={{ color: "#0D9488" }} />
         <span className="font-semibold text-foreground text-sm">Return Guardian</span>
       </div>
 
       <div className="flex-1 flex flex-col justify-center space-y-2">
         <div className="text-center">
-          <div className="text-3xl font-bold" style={{ color: "#D97706" }}>
+          <div className="text-3xl font-bold" style={{ color: "#0D9488" }}>
             {totalTracked}
           </div>
           <div className="text-xs text-muted-foreground">purchases tracked</div>
@@ -1348,7 +1348,7 @@ function AppView() {
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
-      <header className="border-b border-border px-6 py-4" style={{ backgroundColor: "#D97706" }}>
+      <header className="border-b border-border px-6 py-4" style={{ backgroundColor: "#0D9488" }}>
         <div className="max-w-3xl mx-auto flex items-center gap-3">
           <Shield className="w-8 h-8 text-white" />
           <div>
