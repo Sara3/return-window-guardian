@@ -1,0 +1,93 @@
+agentId: 3c3b8e4f-55ba-4eb3-bd34-7336a03d9ed2
+name: Return Window Guardian
+hasUi: true
+triggers:
+  - type: cron
+    defaultSchedule: 0 9 * * *
+    entrypoint: checkRefunds
+    name: Check for refunds
+  - type: cron
+    defaultSchedule: 0 9 * * *
+    entrypoint: dailyAlertCheck
+    name: Daily expiration alerts
+  - type: cron
+    defaultSchedule: 0 9 * * 0
+    entrypoint: weeklySummary
+    name: Weekly summary
+  - type: email
+    entrypoint: handlePurchaseEmail
+    name: Order confirmation emails
+    filters:
+      subject: order
+  - type: email
+    entrypoint: handlePurchaseEmail
+    name: Shipping notification emails
+    filters:
+      subject: shipped
+  - type: email
+    entrypoint: handlePurchaseEmail
+    name: Delivery confirmation emails
+    filters:
+      subject: delivered
+  - type: email
+    entrypoint: handlePurchaseEmail
+    name: Receipt emails
+    filters:
+      subject: receipt
+  - type: email
+    entrypoint: handlePurchaseEmail
+    name: Confirmation emails
+    filters:
+      subject: confirmation
+  - type: email
+    entrypoint: handlePurchaseEmail
+    name: Amazon shipment emails
+    filters:
+      from: amazon
+      subject: shipment
+  - type: email
+    entrypoint: handlePurchaseEmail
+    name: Amazon package emails
+    filters:
+      from: amazon
+      subject: package
+  - type: email
+    entrypoint: handlePurchaseEmail
+    name: Amazon arriving emails
+    filters:
+      from: amazon
+      subject: arriving
+  - type: email
+    entrypoint: handlePurchaseEmail
+    name: Amazon dispatched emails
+    filters:
+      from: amazon
+      subject: dispatched
+  - type: email
+    entrypoint: handlePurchaseEmail
+    name: Tracking notification emails
+    filters:
+      subject: tracking
+  - type: email
+    entrypoint: handlePurchaseEmail
+    name: Your order has emails
+    filters:
+      subject: your order has
+  - type: email
+    entrypoint: handlePurchaseEmail
+    name: On its way emails
+    filters:
+      subject: on its way
+requiredTools:
+  - serverName: 31ed98c5-7fd6-47d9-b21b-b55436a4076e.finance
+    version: 1.0.0
+  - serverName: googlesearch
+    version: 1.0.0
+  - serverName: mail
+    version: 1.3.2
+  - serverName: perplexity
+    version: 1.1.0
+  - serverName: posts
+    version: 1.1.0
+  - serverName: webcrawl
+    version: 1.0.7

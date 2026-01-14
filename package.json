@@ -1,0 +1,41 @@
+{
+  "name": "my-agent",
+  "type": "module",
+  "private": true,
+  "trustedDependencies": [
+    "@dev-agents/sdk-shared"
+  ],
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit && dreamer validate .",
+    "build": "sdk-build",
+    "build:server": "sdk-build --server-only",
+    "build:frontend": "sdk-build --frontend-only",
+    "sync": "dreamer sync .",
+    "push": "dreamer push .",
+    "db:generate": "drizzle-kit generate"
+  },
+  "dependencies": {
+    "@dev-agents/sdk-client": "^3.0.0",
+    "@dev-agents/sdk-server": "^3.0.0",
+    "@dev-agents/sdk-shared": "^3.0.0",
+    "@sinclair/typebox": "^0.34.37",
+    "@tanstack/react-query": "^5.90.2",
+    "@types/react-dom": "^19.1.7",
+    "dayjs": "^1.11.19",
+    "drizzle-orm": "0.44.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "lucide-react": "^0.554.0"
+  },
+  "devDependencies": {
+    "@anthropic-ai/claude-code": "latest",
+    "@types/bun": "latest",
+    "@types/react": "^19.1.8",
+    "bun-plugin-tailwind": "^0.0.15",
+    "drizzle-kit": "^0.31.6"
+  }
+}

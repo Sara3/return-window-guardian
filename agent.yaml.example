@@ -1,0 +1,36 @@
+# Agent Configuration Template
+# This file shows the structure of agent.yaml with its configuration options
+
+agentId: your-agent-id-here
+name: Your Agent Name
+hasUi: true
+
+# UI Views configuration options
+views:
+  - type: app
+  - type: widget
+    name: Single Note
+    identifier: note-widget
+    constraints:
+      minWidth: 120
+      minHeight: 120
+      maxWidth: 480
+      maxHeight: 480
+  - type: feed
+
+# Optional triggers configuration
+triggers:
+  - type: cron
+    defaultSchedule: "0 */2 * * *"  # Every 2 hours
+    entrypoint: "main"  # Optional - defaults to 'main'
+    name: "Check for Updates"  # Optional - custom name for the trigger
+
+  - type: input
+    contentTypes: ["text/uri-list", "text/markdown"]
+    entrypoint: "processText"
+    name: "Process URLs and Markdown"  # Optional - custom name for the trigger
+
+
+# Optional tools configuration
+allowedTools: []
+requiredTools: []

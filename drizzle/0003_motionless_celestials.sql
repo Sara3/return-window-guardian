@@ -1,0 +1,1 @@
+ALTER TABLE `purchases` ADD `delivery_confirmed` integer DEFAULT false;

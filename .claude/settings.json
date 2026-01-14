@@ -1,0 +1,46 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun install"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/may_edit.py"
+          },
+          {
+            "type": "command",
+            "command": "bun .claude/check-checklist.ts"
+          },
+          {
+            "type": "command",
+            "command": "bun .claude/prevent-drizzle-modifications.ts"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun .claude/check-checklist.ts"
+          },
+          {
+            "type": "command",
+            "command": "bun .claude/prevent-drizzle-modifications.ts"
+          }
+        ]
+      }
+    ]
+  }
+}
