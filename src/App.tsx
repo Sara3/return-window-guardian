@@ -565,6 +565,7 @@ interface ReturnInstructions {
 }
 
 // Return modal component - supports both single items and multi-item orders
+// Shows instructions by default with email and automation actions
 function ReturnModal({
   purchase,
   onClose,
@@ -578,17 +579,17 @@ function ReturnModal({
   onSubmitLineItems: (lineItemIds: number[], reason: string, notes: string, action: "view" | "email" | "automate") => void;
   isSubmitting: boolean;
 }) {
-  // Steps: select_items -> select_reason -> choose_action -> show_instructions
-  const [step, setStep] = useState<"select_items" | "select_reason" | "choose_action" | "show_instructions">(
+  // Steps: select_items -> select_reason -> show_actions (shows instructions + actions)
+  const [step, setStep] = useState<"select_items" | "select_reason" | "show_actions">(
     purchase.hasLineItems ? "select_items" : "select_reason"
   );
   const [selectedItemIds, setSelectedItemIds] = useState<number[]>([]);
   const [reason, setReason] = useState("");
   const [notes, setNotes] = useState("");
-  const [selectedAction, setSelectedAction] = useState<"view" | "email" | "automate" | null>(null);
   const [instructions, setInstructions] = useState<ReturnInstructions | null>(null);
   const [isLoadingInstructions, setIsLoadingInstructions] = useState(false);
   const [automationStatus, setAutomationStatus] = useState<"idle" | "running" | "success" | "failed">("idle");
+  const [emailSent, setEmailSent] = useState(false);
 
   // Toggle selection of a line item
   const toggleItem = (itemId: number) => {
@@ -612,9 +613,25 @@ function ReturnModal({
     setStep("select_reason");
   };
 
-  const handleContinueToActions = () => {
+  // When continuing to actions, automatically fetch instructions
+  const handleContinueToActions = async () => {
     if (!reason) return;
-    setStep("choose_action");
+    setStep("show_actions");
+    setIsLoadingInstructions(true);
+    
+    try {
+      const result = await call<typeof getReturnInstructions>("getReturnInstructions", {
+        purchaseId: purchase.id,
+        returnReason: reason,
+      });
+      if (result.success && result.instructions) {
+        setInstructions(result.instructions);
+      }
+    } catch (error) {
+      console.error("Failed to get instructions:", error);
+    } finally {
+      setIsLoadingInstructions(false);
+    }
   };
 
   const handleBack = () => {
@@ -626,68 +643,47 @@ function ReturnModal({
           onClose();
         }
         break;
-      case "choose_action":
+      case "show_actions":
         setStep("select_reason");
-        break;
-      case "show_instructions":
-        setStep("choose_action");
+        setAutomationStatus("idle");
+        setEmailSent(false);
         break;
       default:
         onClose();
     }
   };
 
-  const handleSelectAction = async (action: "view" | "email" | "automate") => {
-    setSelectedAction(action);
-    
-    if (action === "view") {
-      // Fetch and display instructions
-      setIsLoadingInstructions(true);
-      try {
-        const result = await call<typeof getReturnInstructions>("getReturnInstructions", {
-          purchaseId: purchase.id,
-          returnReason: reason,
-        });
-        if (result.success && result.instructions) {
-          setInstructions(result.instructions);
-          setStep("show_instructions");
-        }
-      } catch (error) {
-        console.error("Failed to get instructions:", error);
-      } finally {
-        setIsLoadingInstructions(false);
-      }
-    } else if (action === "email") {
-      // Email instructions to user
-      if (purchase.hasLineItems) {
-        onSubmitLineItems(selectedItemIds, reason, notes, "email");
-      } else {
-        onSubmit(reason, notes, "email");
-      }
-    } else if (action === "automate") {
-      // Trigger automated return
-      setAutomationStatus("running");
-      try {
-        const result = await call<typeof triggerAutomatedReturn>("triggerAutomatedReturn", {
-          purchaseId: purchase.id,
-          returnReason: reason,
-          additionalNotes: notes || undefined,
-        });
-        if (result.success) {
-          setAutomationStatus("success");
-          // Update status after successful automation trigger
-          if (purchase.hasLineItems) {
-            onSubmitLineItems(selectedItemIds, reason, notes, "automate");
-          } else {
-            onSubmit(reason, notes, "automate");
-          }
+  const handleEmailInstructions = async () => {
+    if (purchase.hasLineItems) {
+      onSubmitLineItems(selectedItemIds, reason, notes, "email");
+    } else {
+      onSubmit(reason, notes, "email");
+    }
+    setEmailSent(true);
+  };
+
+  const handleDoItForMe = async () => {
+    setAutomationStatus("running");
+    try {
+      const result = await call<typeof triggerAutomatedReturn>("triggerAutomatedReturn", {
+        purchaseId: purchase.id,
+        returnReason: reason,
+        additionalNotes: notes || undefined,
+      });
+      if (result.success) {
+        setAutomationStatus("success");
+        // Update status after successful automation trigger
+        if (purchase.hasLineItems) {
+          onSubmitLineItems(selectedItemIds, reason, notes, "automate");
         } else {
-          setAutomationStatus("failed");
+          onSubmit(reason, notes, "automate");
         }
-      } catch (error) {
-        console.error("Automation failed:", error);
+      } else {
         setAutomationStatus("failed");
       }
+    } catch (error) {
+      console.error("Automation failed:", error);
+      setAutomationStatus("failed");
     }
   };
 
@@ -711,8 +707,7 @@ function ReturnModal({
             <h2 className="font-semibold text-foreground">
               {step === "select_items" && "Select Items to Return"}
               {step === "select_reason" && "Return Reason"}
-              {step === "choose_action" && "How Would You Like to Proceed?"}
-              {step === "show_instructions" && "Return Instructions"}
+              {step === "show_actions" && "Return Instructions"}
             </h2>
           </div>
           <button
@@ -912,192 +907,208 @@ function ReturnModal({
           </div>
         )}
 
-        {/* Step 3: Choose Action */}
-        {step === "choose_action" && (
+        {/* Step 3: Show Instructions + Actions */}
+        {step === "show_actions" && (
           <div className="p-4 space-y-4">
-            <p className="text-sm text-muted-foreground">
-              Choose how you'd like to proceed with your return:
-            </p>
-
-            {/* Option 1: View Instructions */}
-            <button
-              onClick={() => handleSelectAction("view")}
-              disabled={isLoadingInstructions || isSubmitting}
-              className="w-full p-4 rounded-lg border border-border hover:border-teal-500/50 hover:bg-teal-500/5 transition-all text-left group"
-            >
-              <div className="flex items-start gap-3">
-                <div className="p-2 rounded-lg bg-teal-500/10 text-teal-400 group-hover:bg-teal-500/20">
-                  <ExternalLink className="w-5 h-5" />
+            {/* Loading state */}
+            {isLoadingInstructions && (
+              <div className="flex items-center justify-center py-8">
+                <div className="flex flex-col items-center gap-3">
+                  <LoadingIcon className="w-8 h-8 text-teal-400" />
+                  <p className="text-sm text-muted-foreground">Loading return instructions...</p>
                 </div>
-                <div className="flex-1">
-                  <h4 className="font-medium text-foreground mb-1">View Instructions</h4>
-                  <p className="text-sm text-muted-foreground">
-                    See step-by-step return instructions with a direct link to {purchase.merchant}
-                  </p>
-                </div>
-                {isLoadingInstructions && selectedAction === "view" && (
-                  <LoadingIcon className="w-5 h-5 text-teal-400" />
-                )}
               </div>
-            </button>
+            )}
 
-            {/* Option 2: Email Instructions */}
-            <button
-              onClick={() => handleSelectAction("email")}
-              disabled={isLoadingInstructions || isSubmitting}
-              className="w-full p-4 rounded-lg border border-border hover:border-blue-500/50 hover:bg-blue-500/5 transition-all text-left group"
-            >
-              <div className="flex items-start gap-3">
-                <div className="p-2 rounded-lg bg-blue-500/10 text-blue-400 group-hover:bg-blue-500/20">
-                  <Mail className="w-5 h-5" />
-                </div>
-                <div className="flex-1">
-                  <h4 className="font-medium text-foreground mb-1">Email Instructions</h4>
-                  <p className="text-sm text-muted-foreground">
-                    Get the return instructions and links sent to your email for later
-                  </p>
-                </div>
-                {isSubmitting && selectedAction === "email" && (
-                  <LoadingIcon className="w-5 h-5 text-blue-400" />
+            {/* Instructions display (shown by default) */}
+            {!isLoadingInstructions && instructions && (
+              <>
+                {/* Return link button */}
+                {instructions.returnUrl && (
+                  <a
+                    href={instructions.returnUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block w-full p-3 rounded-lg text-white text-center font-medium hover:opacity-90 transition-colors"
+                    style={{ backgroundColor: "#0D9488" }}
+                  >
+                    <div className="flex items-center justify-center gap-2">
+                      <ExternalLink className="w-4 h-4" />
+                      {instructions.returnAction}
+                    </div>
+                  </a>
                 )}
-              </div>
-            </button>
 
-            {/* Option 3: Do It For Me (Automation) */}
-            <button
-              onClick={() => handleSelectAction("automate")}
-              disabled={isLoadingInstructions || isSubmitting || !supportsAutomation() || automationStatus === "running"}
-              className={`w-full p-4 rounded-lg border transition-all text-left group ${
-                supportsAutomation()
-                  ? "border-border hover:border-purple-500/50 hover:bg-purple-500/5"
-                  : "border-border/50 opacity-60 cursor-not-allowed"
-              }`}
-            >
-              <div className="flex items-start gap-3">
-                <div className={`p-2 rounded-lg ${
-                  supportsAutomation() 
-                    ? "bg-purple-500/10 text-purple-400 group-hover:bg-purple-500/20"
-                    : "bg-secondary text-muted-foreground"
-                }`}>
-                  <Bot className="w-5 h-5" />
-                </div>
-                <div className="flex-1">
-                  <div className="flex items-center gap-2 mb-1">
-                    <h4 className="font-medium text-foreground">Do It For Me</h4>
-                    {supportsAutomation() ? (
-                      <span className="text-xs px-2 py-0.5 rounded bg-purple-500/20 text-purple-400">
-                        ✨ AI-Powered
-                      </span>
-                    ) : (
-                      <span className="text-xs px-2 py-0.5 rounded bg-secondary text-muted-foreground">
-                        Not available
-                      </span>
-                    )}
+                {/* Order details */}
+                <div className="bg-secondary/50 rounded-lg p-3 space-y-2">
+                  {instructions.orderNumber && (
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Order #</span>
+                      <span className="font-mono text-foreground">{instructions.orderNumber}</span>
+                    </div>
+                  )}
+                  <div className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">Amount</span>
+                    <span className="font-medium" style={{ color: "#0D9488" }}>{instructions.amount}</span>
                   </div>
-                  <p className="text-sm text-muted-foreground">
-                    {supportsAutomation()
-                      ? "Our AI will automatically navigate the return process for you"
-                      : `Automation not yet available for ${purchase.merchant}`}
-                  </p>
+                  {instructions.daysLeft !== null && (
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Return window</span>
+                      <span className={instructions.daysLeft <= 3 ? "text-red-400" : "text-foreground"}>
+                        {instructions.daysLeft} days left
+                      </span>
+                    </div>
+                  )}
                 </div>
-                {automationStatus === "running" && (
-                  <LoadingIcon className="w-5 h-5 text-purple-400" />
-                )}
-              </div>
-            </button>
 
-            {automationStatus === "failed" && (
-              <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-3">
-                <p className="text-sm text-red-400">
-                  Automation failed. Please try "View Instructions" to complete the return manually.
+                {/* Step by step instructions */}
+                <div>
+                  <h4 className="text-sm font-medium text-foreground mb-3">Return Steps:</h4>
+                  <ol className="space-y-2">
+                    {instructions.steps.map((instructionStep, index) => (
+                      <li key={index} className="flex gap-3 text-sm">
+                        <span className="flex-shrink-0 w-6 h-6 rounded-full bg-secondary flex items-center justify-center text-xs font-medium text-foreground">
+                          {index + 1}
+                        </span>
+                        <span className="text-muted-foreground pt-0.5">{instructionStep}</span>
+                      </li>
+                    ))}
+                  </ol>
+                </div>
+              </>
+            )}
+
+            {/* No instructions available */}
+            {!isLoadingInstructions && !instructions && (
+              <div className="bg-secondary/50 rounded-lg p-4 text-center">
+                <p className="text-sm text-muted-foreground">
+                  Unable to load specific instructions. Please visit the merchant's website to initiate your return.
                 </p>
               </div>
             )}
 
+            {/* Actions Section */}
+            <div className="border-t border-border pt-4 space-y-3">
+              <h4 className="text-sm font-medium text-foreground">Actions</h4>
+
+              {/* Email Instructions */}
+              <button
+                onClick={handleEmailInstructions}
+                disabled={isSubmitting || emailSent}
+                className={`w-full p-3 rounded-lg border transition-all text-left ${
+                  emailSent
+                    ? "border-green-500/50 bg-green-500/10"
+                    : "border-border hover:border-blue-500/50 hover:bg-blue-500/5"
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className={`p-2 rounded-lg ${emailSent ? "bg-green-500/20 text-green-400" : "bg-blue-500/10 text-blue-400"}`}>
+                    {emailSent ? <Check className="w-4 h-4" /> : <Mail className="w-4 h-4" />}
+                  </div>
+                  <div className="flex-1">
+                    <h5 className="font-medium text-foreground text-sm">
+                      {emailSent ? "Instructions Sent!" : "Email Instructions"}
+                    </h5>
+                    <p className="text-xs text-muted-foreground">
+                      {emailSent ? "Check your inbox for the return instructions" : "Get these instructions sent to your email"}
+                    </p>
+                  </div>
+                  {isSubmitting && !emailSent && (
+                    <LoadingIcon className="w-4 h-4 text-blue-400" />
+                  )}
+                </div>
+              </button>
+
+              {/* Do It For Me (Automation) */}
+              <button
+                onClick={handleDoItForMe}
+                disabled={!supportsAutomation() || automationStatus === "running" || automationStatus === "success"}
+                className={`w-full p-3 rounded-lg border transition-all text-left ${
+                  automationStatus === "success"
+                    ? "border-green-500/50 bg-green-500/10"
+                    : supportsAutomation()
+                      ? "border-border hover:border-purple-500/50 hover:bg-purple-500/5"
+                      : "border-border/50 opacity-60 cursor-not-allowed"
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div className={`p-2 rounded-lg ${
+                    automationStatus === "success"
+                      ? "bg-green-500/20 text-green-400"
+                      : supportsAutomation()
+                        ? "bg-purple-500/10 text-purple-400"
+                        : "bg-secondary text-muted-foreground"
+                  }`}>
+                    {automationStatus === "success" ? <Check className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
+                  </div>
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <h5 className="font-medium text-foreground text-sm">
+                        {automationStatus === "success" ? "Automation Started!" : "Do It For Me"}
+                      </h5>
+                      {supportsAutomation() && automationStatus !== "success" && (
+                        <span className="text-xs px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-400">
+                          ✨ AI
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      {automationStatus === "success"
+                        ? "Browser automation is processing your return"
+                        : supportsAutomation()
+                          ? "AI will automatically navigate the return process for you"
+                          : `Automation not yet available for ${purchase.merchant}`}
+                    </p>
+                  </div>
+                  {automationStatus === "running" && (
+                    <LoadingIcon className="w-4 h-4 text-purple-400" />
+                  )}
+                </div>
+              </button>
+
+              {/* Automation failed message */}
+              {automationStatus === "failed" && (
+                <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-3">
+                  <p className="text-sm text-red-400">
+                    Automation failed. Please use the instructions above to complete the return manually.
+                  </p>
+                </div>
+              )}
+
+              {/* Automation success message */}
+              {automationStatus === "success" && (
+                <div className="bg-green-500/10 border border-green-500/20 rounded-lg p-3">
+                  <div className="flex items-start gap-2">
+                    <Bot className="w-4 h-4 text-green-400 mt-0.5" />
+                    <div>
+                      <p className="text-sm text-green-400 font-medium">
+                        Browser automation started!
+                      </p>
+                      <p className="text-xs text-green-400/80 mt-1">
+                        A browser window will open and navigate through the return process automatically. 
+                        You may need to log in if prompted.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Footer buttons */}
             <div className="flex gap-2 pt-2">
               <button
                 type="button"
                 onClick={handleBack}
-                className="flex-1 px-4 py-2 rounded bg-secondary text-secondary-foreground hover:bg-secondary/80 transition-colors flex items-center justify-center gap-2"
+                className="px-4 py-2 rounded bg-secondary text-secondary-foreground hover:bg-secondary/80 transition-colors flex items-center justify-center gap-2"
               >
                 <ArrowLeft className="w-4 h-4" />
                 Back
               </button>
-            </div>
-          </div>
-        )}
-
-        {/* Step 4: Show Instructions */}
-        {step === "show_instructions" && instructions && (
-          <div className="p-4 space-y-4">
-            {/* Return link button */}
-            {instructions.returnUrl && (
-              <a
-                href={instructions.returnUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="block w-full p-4 rounded-lg text-white text-center font-medium hover:opacity-90 transition-colors"
-                style={{ backgroundColor: "#0D9488" }}
-              >
-                <div className="flex items-center justify-center gap-2">
-                  <ExternalLink className="w-5 h-5" />
-                  {instructions.returnAction}
-                </div>
-              </a>
-            )}
-
-            {/* Order details */}
-            <div className="bg-secondary/50 rounded-lg p-3 space-y-2">
-              {instructions.orderNumber && (
-                <div className="flex justify-between text-sm">
-                  <span className="text-muted-foreground">Order #</span>
-                  <span className="font-mono text-foreground">{instructions.orderNumber}</span>
-                </div>
-              )}
-              <div className="flex justify-between text-sm">
-                <span className="text-muted-foreground">Amount</span>
-                <span className="font-medium" style={{ color: "#0D9488" }}>{instructions.amount}</span>
-              </div>
-              {instructions.daysLeft !== null && (
-                <div className="flex justify-between text-sm">
-                  <span className="text-muted-foreground">Return window</span>
-                  <span className={instructions.daysLeft <= 3 ? "text-red-400" : "text-foreground"}>
-                    {instructions.daysLeft} days left
-                  </span>
-                </div>
-              )}
-            </div>
-
-            {/* Step by step instructions */}
-            <div>
-              <h4 className="text-sm font-medium text-foreground mb-3">Return Steps:</h4>
-              <ol className="space-y-2">
-                {instructions.steps.map((step, index) => (
-                  <li key={index} className="flex gap-3 text-sm">
-                    <span className="flex-shrink-0 w-6 h-6 rounded-full bg-secondary flex items-center justify-center text-xs font-medium text-foreground">
-                      {index + 1}
-                    </span>
-                    <span className="text-muted-foreground pt-0.5">{step}</span>
-                  </li>
-                ))}
-              </ol>
-            </div>
-
-            {/* Email option */}
-            <button
-              onClick={() => handleSelectAction("email")}
-              disabled={isSubmitting}
-              className="w-full py-2 rounded border border-border text-sm text-muted-foreground hover:bg-secondary/50 transition-colors flex items-center justify-center gap-2"
-            >
-              <Mail className="w-4 h-4" />
-              Also email me these instructions
-            </button>
-
-            <div className="flex gap-2 pt-2">
               <button
                 type="button"
                 onClick={onClose}
-                className="flex-1 px-4 py-2 rounded bg-secondary text-secondary-foreground hover:bg-secondary/80 transition-colors"
+                className="flex-1 px-4 py-2 rounded text-white transition-colors"
+                style={{ backgroundColor: "#0D9488" }}
               >
                 Done
               </button>
