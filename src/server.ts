@@ -566,12 +566,15 @@ EACH ITEM that ships separately should be its own entry in the "orders" array.
 IMPORTANT - FORWARDED EMAILS: This email may be a FORWARDED purchase email.
 Look for these indicators:
 - Subject starting with "Fw:", "Fwd:", "FW:", or "Forwarded:"
-- Body containing "--- Forwarded Message ---", "---------- Forwarded message ----------", or similar markers
+- Body containing "--- Forwarded Message ---", "----- Forwarded Message -----", "---------- Forwarded message ----------", or similar markers
 - Body containing "From:" and "Subject:" headers within the message body
+- Look for "Sent:" date in the forwarded headers - this is the ORIGINAL PURCHASE DATE!
 
-If this is a forwarded email, extract purchase info from the ORIGINAL message content inside the forward.
-The MERCHANT should be from the original sender (e.g., "Perfect Corset", "Amazon", etc.), NOT the person who forwarded it.
-Forwarded purchase emails should be treated as valid purchases - do NOT mark them as "not_purchase" just because they were forwarded.
+If this is a forwarded email:
+1. Extract purchase info from the ORIGINAL message content inside the forward
+2. The MERCHANT should be from the original sender (e.g., "Perfect Corset", "Amazon", etc.), NOT the person who forwarded it
+3. CRITICAL: Extract the ORIGINAL DATE from "Sent: Wednesday, August 27, 2025..." or similar - this is when the purchase was made!
+4. Forwarded purchase emails should be treated as valid purchases - do NOT mark them as "not_purchase" just because they were forwarded
 
 From: ${email.sender}
 Subject: ${email.subject}
@@ -600,6 +603,10 @@ Also determine:
   Extract the card type (Visa, Mastercard, Amex, Discover, etc.) and last 4 digits.
   If payment method is not visible in the email, use EMPTY STRING "" for both cardType and lastFour.
   Do NOT use placeholder values like "UNKNOWN" or "<UNKNOWN>".
+- ORIGINAL PURCHASE DATE: For forwarded emails, look for "Sent:" header in the forwarded content.
+  Example: "Sent: Wednesday, August 27, 2025 at 05:18:35 PM PDT" -> extract "2025-08-27"
+  For non-forwarded emails, use the email's actual send date.
+  Format: YYYY-MM-DD (e.g., "2025-08-27")
 
 If this is NOT a purchase-related email (marketing, newsletter, etc.), set emailType to "not_purchase" and return empty orders array.
 For text fields you cannot determine, use empty string "". Do NOT use placeholders like "UNKNOWN" or "<UNKNOWN>".
@@ -612,6 +619,7 @@ REMEMBER: Return ALL orders found. Do NOT combine multiple orders into one.`,
               deliveryAddress: Type.String(),
               paymentCardType: Type.String({ default: "" }), // Visa, Mastercard, Amex, Discover, etc. Use "" if not visible
               paymentCardLastFour: Type.String({ default: "" }), // Last 4 digits like "1234". Use "" if not visible
+              originalPurchaseDate: Type.String({ default: "" }), // YYYY-MM-DD format, from forwarded "Sent:" header or email date
               orders: Type.Array(Type.Object({
                 orderNumber: Type.String(),
                 itemDescription: Type.String(),
@@ -642,6 +650,17 @@ REMEMBER: Return ALL orders found. Do NOT combine multiple orders into one.`,
           const cardUsed = isValidCard 
             ? `${rawCardType} ****${rawCardLastFour}` 
             : null;
+          
+          // Parse original purchase date from forwarded email or use current date
+          const rawPurchaseDate = (extractedRaw.originalPurchaseDate as string) || "";
+          let purchaseDate: Date = now.toDate();
+          if (rawPurchaseDate) {
+            const parsed = dayjs(rawPurchaseDate).tz(getUserTimeZone());
+            if (parsed.isValid()) {
+              purchaseDate = parsed.toDate();
+              console.log(`scanRecentEmails: Using original purchase date from email: ${rawPurchaseDate}`);
+            }
+          }
           
           const orders = (extractedRaw.orders as Array<{
             orderNumber: string;
@@ -723,7 +742,7 @@ REMEMBER: Return ALL orders found. Do NOT combine multiple orders into one.`,
                 merchant: merchant ?? "Unknown",
                 amount: amountCents,
                 cardUsed: cardUsed,
-                purchaseDate: now.toDate(),
+                purchaseDate: purchaseDate,
                 orderNumber: orderNumber,
                 itemDescription: itemDescription,
                 deliveryDate: deliveryDate,
@@ -758,7 +777,7 @@ REMEMBER: Return ALL orders found. Do NOT combine multiple orders into one.`,
                   const cardName = await findMatchingCard(sdk, {
                     merchant: merchant,
                     amount: amountCents,
-                    purchaseDate: now.toDate(),
+                    purchaseDate: purchaseDate,
                   });
                   if (cardName) {
                     await db
@@ -854,7 +873,7 @@ REMEMBER: Return ALL orders found. Do NOT combine multiple orders into one.`,
                   merchant: merchant,
                   orderNumber: orderNumber,
                   itemDescription: itemDescription,
-                  purchaseDate: now.toDate(), // Use current date since we don't have original order date
+                  purchaseDate: purchaseDate, // Uses extracted date from forwarded email or current date
                   amount: amountCents,
                   deliveryAddress: deliveryAddress,
                   trackingNumber: trackingNumber,
