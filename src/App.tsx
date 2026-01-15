@@ -5,8 +5,8 @@ import { QueryClientProvider, useMutation, useQuery, useQueryClient } from "@tan
 import dayjs from "dayjs";
 import timezone from "dayjs/plugin/timezone";
 import utc from "dayjs/plugin/utc";
-import { useState } from "react";
-import { AlertTriangle, ArrowLeft, Bot, Calendar, Camera, Check, CheckCircle, ChevronDown, Circle, Clock, CreditCard, ExternalLink, Image as ImageIcon, Mail, MapPin, Package, RefreshCw, RotateCcw, Send, Shield, Store, Truck, X } from "lucide-react";
+import { useState, useEffect } from "react";
+import { AlertTriangle, ArrowLeft, Calendar, Camera, Check, CheckCircle, ChevronDown, Circle, Clock, Copy, CreditCard, ExternalLink, Image as ImageIcon, Mail, MapPin, Package, RefreshCw, RotateCcw, Send, Shield, Store, Truck, X } from "lucide-react";
 // Note: CreditCard icon kept for displaying card info in purchase cards
 import type {
   getTrackedPurchases,
@@ -20,7 +20,6 @@ import type {
   markAsDelivered,
   getReturnInstructions,
   emailReturnInstructions,
-  triggerAutomatedReturn,
 } from "./server";
 
 dayjs.extend(utc);
@@ -579,17 +578,41 @@ function ReturnModal({
   onSubmitLineItems: (lineItemIds: number[], reason: string, notes: string, action: "view" | "email" | "automate") => void;
   isSubmitting: boolean;
 }) {
-  // Steps: select_items -> select_reason -> show_actions (shows instructions + actions)
-  const [step, setStep] = useState<"select_items" | "select_reason" | "show_actions">(
-    purchase.hasLineItems ? "select_items" : "select_reason"
+  // Steps: select_items -> show_actions (skipping reason selection)
+  const [step, setStep] = useState<"select_items" | "show_actions">(
+    purchase.hasLineItems ? "select_items" : "show_actions"
   );
   const [selectedItemIds, setSelectedItemIds] = useState<number[]>([]);
-  const [reason, setReason] = useState("");
-  const [notes, setNotes] = useState("");
+  const [reason] = useState("other"); // Default reason, no longer user-selected
+  const [notes] = useState("");
   const [instructions, setInstructions] = useState<ReturnInstructions | null>(null);
   const [isLoadingInstructions, setIsLoadingInstructions] = useState(false);
   const [automationStatus, setAutomationStatus] = useState<"idle" | "running" | "success" | "failed">("idle");
   const [emailSent, setEmailSent] = useState(false);
+
+  // Load instructions immediately for single-item orders
+  useEffect(() => {
+    if (!purchase.hasLineItems && step === "show_actions") {
+      loadInstructions();
+    }
+  }, []);
+
+  const loadInstructions = async () => {
+    setIsLoadingInstructions(true);
+    try {
+      const result = await call<typeof getReturnInstructions>("getReturnInstructions", {
+        purchaseId: purchase.id,
+        returnReason: reason,
+      });
+      if (result.success && result.instructions) {
+        setInstructions(result.instructions);
+      }
+    } catch (error) {
+      console.error("Failed to get instructions:", error);
+    } finally {
+      setIsLoadingInstructions(false);
+    }
+  };
 
   // Toggle selection of a line item
   const toggleItem = (itemId: number) => {
@@ -608,45 +631,22 @@ function ReturnModal({
     }
   };
 
-  const handleContinueToReason = () => {
-    if (purchase.hasLineItems && selectedItemIds.length === 0) return;
-    setStep("select_reason");
-  };
-
-  // When continuing to actions, automatically fetch instructions
   const handleContinueToActions = async () => {
-    if (!reason) return;
+    if (purchase.hasLineItems && selectedItemIds.length === 0) return;
     setStep("show_actions");
-    setIsLoadingInstructions(true);
-    
-    try {
-      const result = await call<typeof getReturnInstructions>("getReturnInstructions", {
-        purchaseId: purchase.id,
-        returnReason: reason,
-      });
-      if (result.success && result.instructions) {
-        setInstructions(result.instructions);
-      }
-    } catch (error) {
-      console.error("Failed to get instructions:", error);
-    } finally {
-      setIsLoadingInstructions(false);
-    }
+    loadInstructions();
   };
 
   const handleBack = () => {
     switch (step) {
-      case "select_reason":
+      case "show_actions":
         if (purchase.hasLineItems) {
           setStep("select_items");
+          setAutomationStatus("idle");
+          setEmailSent(false);
         } else {
           onClose();
         }
-        break;
-      case "show_actions":
-        setStep("select_reason");
-        setAutomationStatus("idle");
-        setEmailSent(false);
         break;
       default:
         onClose();
@@ -663,26 +663,107 @@ function ReturnModal({
   };
 
   const handleDoItForMe = async () => {
-    setAutomationStatus("running");
-    try {
-      const result = await call<typeof triggerAutomatedReturn>("triggerAutomatedReturn", {
-        purchaseId: purchase.id,
-        returnReason: reason,
-        additionalNotes: notes || undefined,
-      });
-      if (result.success) {
-        setAutomationStatus("success");
-        // Update status after successful automation trigger
-        if (purchase.hasLineItems) {
-          onSubmitLineItems(selectedItemIds, reason, notes, "automate");
-        } else {
-          onSubmit(reason, notes, "automate");
+    // Copy comprehensive return details for browser-use automation
+    const reasonLabel = RETURN_REASONS.find(r => r.value === reason)?.label || reason;
+    
+    // Build line items section if applicable
+    let lineItemsSection = "";
+    if (purchase.hasLineItems && selectedItemIds.length > 0) {
+      const selectedItems = purchase.lineItems.filter(item => selectedItemIds.includes(item.id));
+      lineItemsSection = selectedItems.map((item, idx) => 
+        `  ${idx + 1}. ${item.description}${item.quantity && item.quantity > 1 ? ` (Qty: ${item.quantity})` : ""}${item.amount ? ` - ${item.amount}` : ""}`
+      ).join("\n");
+    }
+    
+    const details = [
+      `=== RETURN REQUEST ===`,
+      ``,
+      `STORE: ${purchase.merchant}`,
+      instructions?.orderNumber ? `ORDER NUMBER: ${instructions.orderNumber}` : null,
+      `AMOUNT: ${instructions?.amount || purchase.amount}`,
+      purchase.cardUsed ? `CARD USED: ${purchase.cardUsed}` : null,
+      ``,
+      `--- Item Details ---`,
+      `Description: ${purchase.itemDescription || "N/A"}`,
+      purchase.hasLineItems && lineItemsSection ? `Items to Return:\n${lineItemsSection}` : null,
+      purchase.productImageUrl ? `Product Image: ${purchase.productImageUrl}` : null,
+      ``,
+      `--- Return Reason ---`,
+      `Reason: ${reasonLabel}`,
+      notes ? `Additional Notes: ${notes}` : null,
+      ``,
+      `--- Order Info ---`,
+      purchase.purchaseDate ? `Purchase Date: ${dayjs(purchase.purchaseDate).tz(getUserTimeZone()).format("MMMM D, YYYY")}` : null,
+      purchase.deliveryDate ? `Delivery Date: ${dayjs(purchase.deliveryDate).tz(getUserTimeZone()).format("MMMM D, YYYY")}` : null,
+      purchase.deliveryConfirmed ? `Delivery Confirmed: Yes` : null,
+      purchase.deliveryAddress ? `Delivery Address: ${purchase.deliveryAddress}` : null,
+      purchase.trackingNumber ? `Tracking Number: ${purchase.trackingNumber}` : null,
+      purchase.carrier ? `Carrier: ${purchase.carrier}` : null,
+      ``,
+      `--- Return Window ---`,
+      instructions?.daysLeft != null ? `Days Left: ${instructions.daysLeft} days` : null,
+      purchase.storePolicy.windowDays ? `Store Return Window: ${purchase.storePolicy.windowDays} days (from ${purchase.storePolicy.startsFrom || "purchase"})` : null,
+      purchase.storePolicy.expires ? `Store Policy Expires: ${dayjs(purchase.storePolicy.expires).tz(getUserTimeZone()).format("MMMM D, YYYY")}` : null,
+      purchase.storePolicy.sourceUrl ? `Store Policy URL: ${purchase.storePolicy.sourceUrl}` : null,
+      ``,
+      `--- Card Protection ---`,
+      purchase.cardProtection.windowDays ? `Card Protection Window: ${purchase.cardProtection.windowDays} days` : null,
+      purchase.cardProtection.maxClaim ? `Max Claim Amount: ${purchase.cardProtection.maxClaim}` : null,
+      purchase.cardProtection.expires ? `Card Protection Expires: ${dayjs(purchase.cardProtection.expires).tz(getUserTimeZone()).format("MMMM D, YYYY")}` : null,
+      purchase.cardProtection.sourceUrl ? `Card Protection URL: ${purchase.cardProtection.sourceUrl}` : null,
+      ``,
+      `--- Return Portal ---`,
+      instructions?.returnUrl ? `URL: ${instructions.returnUrl}` : null,
+      instructions?.returnAction ? `Action: ${instructions.returnAction}` : null,
+      ``,
+      instructions?.steps?.length ? `--- Steps ---\n${instructions.steps.map((s, i) => `${i + 1}. ${s}`).join("\n")}` : null,
+    ].filter(Boolean).join("\n");
+    
+    // Try modern clipboard API first, with fallback to older method
+    const copyToClipboard = async (text: string): Promise<boolean> => {
+      // Try modern Clipboard API first
+      if (navigator.clipboard && window.isSecureContext) {
+        try {
+          await navigator.clipboard.writeText(text);
+          return true;
+        } catch (err) {
+          console.warn("Clipboard API failed, trying fallback:", err);
         }
-      } else {
-        setAutomationStatus("failed");
       }
-    } catch (error) {
-      console.error("Automation failed:", error);
+      
+      // Fallback: create a textarea element
+      try {
+        const textArea = document.createElement("textarea");
+        textArea.value = text;
+        textArea.style.position = "fixed";
+        textArea.style.left = "-999999px";
+        textArea.style.top = "-999999px";
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        const success = document.execCommand("copy");
+        document.body.removeChild(textArea);
+        return success;
+      } catch (err) {
+        console.error("Fallback copy failed:", err);
+        return false;
+      }
+    };
+
+    console.log("Copying return details to clipboard:", details);
+    
+    const success = await copyToClipboard(details);
+    
+    if (success) {
+      setAutomationStatus("success");
+      // Update status after copying
+      if (purchase.hasLineItems) {
+        onSubmitLineItems(selectedItemIds, reason, notes, "automate");
+      } else {
+        onSubmit(reason, notes, "automate");
+      }
+    } else {
+      console.error("Failed to copy to clipboard");
       setAutomationStatus("failed");
     }
   };
@@ -690,12 +771,6 @@ function ReturnModal({
   // Get items that can still be returned (status = "keeping")
   const returnableItems = purchase.lineItems.filter((item) => item.status === "keeping");
   const alreadyReturnedItems = purchase.lineItems.filter((item) => item.status === "returned");
-
-  // Check if this merchant supports automation
-  const supportsAutomation = () => {
-    const m = purchase.merchant.toLowerCase();
-    return m.includes("amazon") || m.includes("walmart") || m.includes("target");
-  };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 backdrop-blur-sm">
@@ -705,9 +780,7 @@ function ReturnModal({
           <div className="flex items-center gap-2">
             <RotateCcw className="w-5 h-5" style={{ color: "#0D9488" }} />
             <h2 className="font-semibold text-foreground">
-              {step === "select_items" && "Select Items to Return"}
-              {step === "select_reason" && "Return Reason"}
-              {step === "show_actions" && "Return Instructions"}
+              {step === "select_items" ? "Select Items to Return" : "Return Instructions"}
             </h2>
           </div>
           <button
@@ -822,7 +895,7 @@ function ReturnModal({
               </button>
               <button
                 type="button"
-                onClick={handleContinueToReason}
+                onClick={handleContinueToActions}
                 disabled={selectedItemIds.length === 0}
                 className="flex-1 px-4 py-2 rounded text-white disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
                 style={{ backgroundColor: "#0D9488" }}
@@ -834,80 +907,7 @@ function ReturnModal({
           </div>
         )}
 
-        {/* Step 2: Select Reason */}
-        {step === "select_reason" && (
-          <div className="p-4 space-y-4">
-            {/* Show selected items summary for multi-item orders */}
-            {purchase.hasLineItems && selectedItemIds.length > 0 && (
-              <div className="bg-secondary/50 rounded-lg p-3">
-                <p className="text-xs text-muted-foreground mb-2">Returning {selectedItemIds.length} item(s):</p>
-                <div className="space-y-1">
-                  {purchase.lineItems
-                    .filter((item) => selectedItemIds.includes(item.id))
-                    .map((item) => (
-                      <p key={item.id} className="text-sm text-foreground truncate">
-                        • {item.description}
-                      </p>
-                    ))}
-                </div>
-              </div>
-            )}
-
-            <div>
-              <label className="block text-sm font-medium text-foreground mb-2">
-                Why are you returning {purchase.hasLineItems ? "these items" : "this item"}?
-              </label>
-              <select
-                value={reason}
-                onChange={(e) => setReason(e.target.value)}
-                className="w-full px-3 py-2 rounded border border-border bg-background text-foreground"
-                required
-              >
-                <option value="">Select a reason...</option>
-                {RETURN_REASONS.map((r) => (
-                  <option key={r.value} value={r.value}>
-                    {r.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-foreground mb-2">
-                Additional notes (optional)
-              </label>
-              <textarea
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                placeholder="Any additional details about the return..."
-                className="w-full px-3 py-2 rounded border border-border bg-background text-foreground placeholder:text-muted-foreground resize-none"
-                rows={3}
-              />
-            </div>
-
-            <div className="flex gap-2 pt-2">
-              <button
-                type="button"
-                onClick={handleBack}
-                className="flex-1 px-4 py-2 rounded bg-secondary text-secondary-foreground hover:bg-secondary/80 transition-colors flex items-center justify-center gap-2"
-              >
-                <ArrowLeft className="w-4 h-4" />
-                {purchase.hasLineItems ? "Back" : "Cancel"}
-              </button>
-              <button
-                type="button"
-                onClick={handleContinueToActions}
-                disabled={!reason}
-                className="flex-1 px-4 py-2 rounded text-white disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
-                style={{ backgroundColor: "#0D9488" }}
-              >
-                Continue
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Step 3: Show Instructions + Actions */}
+        {/* Step 2: Show Instructions + Actions */}
         {step === "show_actions" && (
           <div className="p-4 space-y-4">
             {/* Loading state */}
@@ -923,21 +923,49 @@ function ReturnModal({
             {/* Instructions display (shown by default) */}
             {!isLoadingInstructions && instructions && (
               <>
-                {/* Return link button */}
-                {instructions.returnUrl && (
-                  <a
-                    href={instructions.returnUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="block w-full p-3 rounded-lg text-white text-center font-medium hover:opacity-90 transition-colors"
-                    style={{ backgroundColor: "#0D9488" }}
+                {/* Primary Action Buttons - Return to Store + Copy Details */}
+                <div className="space-y-2">
+                  {/* Return to Store - Big teal button */}
+                  {instructions.returnUrl && (
+                    <a
+                      href={instructions.returnUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="block w-full p-4 rounded-lg text-white text-center font-semibold text-lg hover:opacity-90 transition-colors"
+                      style={{ backgroundColor: "#0D9488" }}
+                    >
+                      <div className="flex items-center justify-center gap-2">
+                        <ExternalLink className="w-5 h-5" />
+                        {instructions.returnAction}
+                      </div>
+                    </a>
+                  )}
+
+                  {/* Copy Details - Big purple button */}
+                  <button
+                    onClick={handleDoItForMe}
+                    disabled={automationStatus === "success"}
+                    className={`w-full p-4 rounded-lg font-semibold text-lg transition-all ${
+                      automationStatus === "success"
+                        ? "bg-green-500/20 text-green-400 border border-green-500/50"
+                        : "bg-gradient-to-r from-purple-600 to-pink-600 text-white hover:from-purple-700 hover:to-pink-700"
+                    }`}
                   >
                     <div className="flex items-center justify-center gap-2">
-                      <ExternalLink className="w-4 h-4" />
-                      {instructions.returnAction}
+                      {automationStatus === "success" ? (
+                        <>
+                          <Check className="w-5 h-5" />
+                          Copied to Clipboard!
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-5 h-5" />
+                          Do it for me
+                        </>
+                      )}
                     </div>
-                  </a>
-                )}
+                  </button>
+                </div>
 
                 {/* Order details */}
                 <div className="bg-secondary/50 rounded-lg p-3 space-y-2">
@@ -960,21 +988,6 @@ function ReturnModal({
                     </div>
                   )}
                 </div>
-
-                {/* Step by step instructions */}
-                <div>
-                  <h4 className="text-sm font-medium text-foreground mb-3">Return Steps:</h4>
-                  <ol className="space-y-2">
-                    {instructions.steps.map((instructionStep, index) => (
-                      <li key={index} className="flex gap-3 text-sm">
-                        <span className="flex-shrink-0 w-6 h-6 rounded-full bg-secondary flex items-center justify-center text-xs font-medium text-foreground">
-                          {index + 1}
-                        </span>
-                        <span className="text-muted-foreground pt-0.5">{instructionStep}</span>
-                      </li>
-                    ))}
-                  </ol>
-                </div>
               </>
             )}
 
@@ -987,115 +1000,8 @@ function ReturnModal({
               </div>
             )}
 
-            {/* Actions Section */}
-            <div className="border-t border-border pt-4 space-y-3">
-              <h4 className="text-sm font-medium text-foreground">Actions</h4>
-
-              {/* Email Instructions */}
-              <button
-                onClick={handleEmailInstructions}
-                disabled={isSubmitting || emailSent}
-                className={`w-full p-3 rounded-lg border transition-all text-left ${
-                  emailSent
-                    ? "border-green-500/50 bg-green-500/10"
-                    : "border-border hover:border-blue-500/50 hover:bg-blue-500/5"
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <div className={`p-2 rounded-lg ${emailSent ? "bg-green-500/20 text-green-400" : "bg-blue-500/10 text-blue-400"}`}>
-                    {emailSent ? <Check className="w-4 h-4" /> : <Mail className="w-4 h-4" />}
-                  </div>
-                  <div className="flex-1">
-                    <h5 className="font-medium text-foreground text-sm">
-                      {emailSent ? "Instructions Sent!" : "Email Instructions"}
-                    </h5>
-                    <p className="text-xs text-muted-foreground">
-                      {emailSent ? "Check your inbox for the return instructions" : "Get these instructions sent to your email"}
-                    </p>
-                  </div>
-                  {isSubmitting && !emailSent && (
-                    <LoadingIcon className="w-4 h-4 text-blue-400" />
-                  )}
-                </div>
-              </button>
-
-              {/* Do It For Me (Automation) */}
-              <button
-                onClick={handleDoItForMe}
-                disabled={!supportsAutomation() || automationStatus === "running" || automationStatus === "success"}
-                className={`w-full p-3 rounded-lg border transition-all text-left ${
-                  automationStatus === "success"
-                    ? "border-green-500/50 bg-green-500/10"
-                    : supportsAutomation()
-                      ? "border-border hover:border-purple-500/50 hover:bg-purple-500/5"
-                      : "border-border/50 opacity-60 cursor-not-allowed"
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <div className={`p-2 rounded-lg ${
-                    automationStatus === "success"
-                      ? "bg-green-500/20 text-green-400"
-                      : supportsAutomation()
-                        ? "bg-purple-500/10 text-purple-400"
-                        : "bg-secondary text-muted-foreground"
-                  }`}>
-                    {automationStatus === "success" ? <Check className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
-                  </div>
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2">
-                      <h5 className="font-medium text-foreground text-sm">
-                        {automationStatus === "success" ? "Automation Started!" : "Do It For Me"}
-                      </h5>
-                      {supportsAutomation() && automationStatus !== "success" && (
-                        <span className="text-xs px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-400">
-                          ✨ AI
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      {automationStatus === "success"
-                        ? "Browser automation is processing your return"
-                        : supportsAutomation()
-                          ? "AI will automatically navigate the return process for you"
-                          : `Automation not yet available for ${purchase.merchant}`}
-                    </p>
-                  </div>
-                  {automationStatus === "running" && (
-                    <LoadingIcon className="w-4 h-4 text-purple-400" />
-                  )}
-                </div>
-              </button>
-
-              {/* Automation failed message */}
-              {automationStatus === "failed" && (
-                <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-3">
-                  <p className="text-sm text-red-400">
-                    Automation failed. Please use the instructions above to complete the return manually.
-                  </p>
-                </div>
-              )}
-
-              {/* Automation success message */}
-              {automationStatus === "success" && (
-                <div className="bg-green-500/10 border border-green-500/20 rounded-lg p-3">
-                  <div className="flex items-start gap-2">
-                    <Bot className="w-4 h-4 text-green-400 mt-0.5" />
-                    <div>
-                      <p className="text-sm text-green-400 font-medium">
-                        Browser automation started!
-                      </p>
-                      <p className="text-xs text-green-400/80 mt-1">
-                        A browser window will open and navigate through the return process automatically. 
-                        You may need to log in if prompted.
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Footer buttons */}
-            <div className="flex gap-2 pt-2">
+            {/* Footer with Back, Done, and Email option */}
+            <div className="flex items-center justify-between pt-2">
               <button
                 type="button"
                 onClick={handleBack}
@@ -1104,10 +1010,25 @@ function ReturnModal({
                 <ArrowLeft className="w-4 h-4" />
                 Back
               </button>
+              
+              {/* Small email button */}
+              <button
+                onClick={handleEmailInstructions}
+                disabled={isSubmitting || emailSent}
+                className={`px-3 py-2 text-xs rounded transition-colors flex items-center gap-1.5 ${
+                  emailSent
+                    ? "text-green-400"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {emailSent ? <Check className="w-3 h-3" /> : <Mail className="w-3 h-3" />}
+                {emailSent ? "Sent!" : "Email me"}
+              </button>
+              
               <button
                 type="button"
                 onClick={onClose}
-                className="flex-1 px-4 py-2 rounded text-white transition-colors"
+                className="px-6 py-2 rounded text-white transition-colors"
                 style={{ backgroundColor: "#0D9488" }}
               >
                 Done
@@ -2153,7 +2074,7 @@ function WidgetView() {
     <div className="h-full flex flex-col p-3">
       <div className="flex items-center gap-2 mb-3">
         <Shield className="w-5 h-5" style={{ color: "#0D9488" }} />
-        <span className="font-semibold text-foreground text-sm">Return Guardian</span>
+        <span className="font-semibold text-foreground text-sm">Returnable</span>
       </div>
 
       <div className="flex-1 flex flex-col justify-center space-y-2">
@@ -2193,10 +2114,7 @@ function AppView() {
       <header className="border-b border-border px-6 py-4" style={{ backgroundColor: "#0D9488" }}>
         <div className="max-w-3xl mx-auto flex items-center gap-3">
           <Shield className="w-8 h-8 text-white" />
-          <div>
-            <h1 className="text-xl font-bold text-white">Return Window Guardian</h1>
-            <p className="text-sm text-white/80">Never miss a return deadline</p>
-          </div>
+          <h1 className="text-xl font-bold text-white">Returnable</h1>
         </div>
       </header>
 
